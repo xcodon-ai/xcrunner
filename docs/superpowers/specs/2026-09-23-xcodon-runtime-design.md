@@ -123,7 +123,7 @@ uncompressed tar. The legacy `manifest.json` in the same archive is ignored.
   refs.json                  "docker.io/library/python:3.12" -> image id
   containers/<id>/           see section 4
   locks/                     flock files for layers and images
-  bin/                       optional user-provided bwrap or proot
+  bin/                       optional user-provided bwrap
 ```
 
 The image id is the SHA-256 digest of the config blob, as in docker. Layers are
@@ -199,6 +199,7 @@ containers/<id>/
   config.json    image id, image ref, engine, argv, env, workdir, uid, gid,
                  binds, name, created time, state
   upper/  work/  writable layer and overlay work dir          (ns engine)
+  merged/        overlay mount point, empty when not running    (ns engine)
   rootfs/        full copy of the image rootfs                (proot engine)
   keeper.pid     pid and start time of the keeper             (ns engine)
   sandbox.pid    pid of the sandbox init reported by bwrap    (ns engine)
@@ -262,8 +263,9 @@ bwrap --bind <merged> / --proc /proc --dev /dev --ro-bind /sys /sys
       --ro-bind /etc/resolv.conf /etc/resolv.conf --ro-bind /etc/hosts /etc/hosts
       [--bind|--ro-bind <host> <guest> ...]
       --unshare-pid --unshare-uts --hostname <id12>
+      --ro-bind <vendored pause> /.xcodon/pause
       --die-with-parent --info-fd <fd>
-      sleep infinity
+      /.xcodon/pause
 ```
 
 bwrap runs as the mapped root of the new user namespace, so it does not need
@@ -287,12 +289,11 @@ Liveness: a container is running when `keeper.pid` names a live process whose
 start time in `/proc/<pid>/stat` matches the recorded one. This survives pid
 reuse after a reboot.
 
-`sleep` must exist in the image for the keeper. Images without `sleep` such as
-distroless images use the vendored PRoot binary's directory as a fallback:
-the keeper binds a tiny static `xcodon-pause` helper (a C program that only
-pauses, vendored next to PRoot) read-only into the sandbox at
-`/.xcodon/pause` and runs that instead. The default is `sleep infinity` when
-present, because it needs nothing extra.
+The keeper's sandbox process is `xcodon-pause`, a static C program of a
+few lines that blocks in `pause()` forever. It is vendored next to PRoot and
+bound read-only into the sandbox, so the keeper does not depend on the image
+containing `sleep` or any shell. Distroless images work the same as full
+ones.
 
 ### 4.5 proot engine
 
@@ -313,10 +314,10 @@ proot -r <rootfs> -w <workdir> -i <uid>:<gid>
 Environment is passed through the process environment. Writes go straight
 into `rootfs/`, which is the persistent layer. `stop` is a no-op.
 
-The PRoot binary is `xcodon_runtime/_bin/proot-x86_64` or `proot-aarch64`.
-`XCODON_PROOT` points at an alternative binary. `XCODON_PROOT_ARGS` appends
-extra flags, which lets a user turn seccomp acceleration off on kernels
-where it misbehaves.
+PRoot lookup order: `XCODON_PROOT` if set, else the vendored
+`xcodon_runtime/_bin/proot-<arch>` for x86_64 or aarch64. `XCODON_PROOT_ARGS`
+appends extra flags, which lets a user turn seccomp acceleration off on
+kernels where it misbehaves.
 
 ### 4.6 Engine selection
 
@@ -342,8 +343,8 @@ orphaned by a changed decision.
 
 Docker-compatible subset. Unknown flags fail with a message that names the
 flag. `--memory`, `--cpus`, `--cpu-shares`, `--gpus`, `--net`, `--network`,
-`--read-only`, `--log-driver`, and `--cidfile` are accepted and ignored with a
-warning, because cwltool or docker-py callers may pass them.
+`--read-only`, and `--log-driver` are accepted and ignored with a warning,
+because cwltool or docker-py callers may pass them.
 
 ```
 xcodon pull [--platform P] IMAGE
