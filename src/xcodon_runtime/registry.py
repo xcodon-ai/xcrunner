@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -167,10 +168,14 @@ class RegistryClient:
         part = final.with_name(hexdigest + ".part")
         h = hashlib.sha256()
         log.info("downloading %s", digest[:19])
-        with self._get(ref, f"blobs/{digest}") as r, open(part, "wb") as out:
-            for chunk in iter(lambda: r.read(CHUNK), b""):
-                h.update(chunk)
-                out.write(chunk)
+        try:
+            with self._get(ref, f"blobs/{digest}") as r, open(part, "wb") as out:
+                for chunk in iter(lambda: r.read(CHUNK), b""):
+                    h.update(chunk)
+                    out.write(chunk)
+        except (OSError, http.client.HTTPException, urllib.error.URLError) as e:
+            part.unlink(missing_ok=True)
+            raise PullError(f"download of {digest} failed: {e}") from e
         if h.hexdigest() != hexdigest:
             part.unlink(missing_ok=True)
             raise PullError(f"digest mismatch for {digest}: got sha256:{h.hexdigest()}")

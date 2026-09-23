@@ -91,6 +91,15 @@ def test_digest_mismatch_is_rejected(home, reg):
     assert not list(home.blobs.glob("*.part"))
 
 
+def test_truncated_blob_transfer_is_pull_error(home, reg):
+    layers = [layer_bytes("a", b"A" * 1000)]
+    reg.add_image("lib/flaky", "latest", config_for(layers), layers)
+    reg.truncate.add(digest_of(layers[0]))
+    with pytest.raises(PullError, match="download of|digest mismatch"):
+        RegistryClient(home, scheme="http").fetch(Reference(reg.host, "lib/flaky", "latest"), Platform())
+    assert not list(home.blobs.glob("*.part"))
+
+
 def test_missing_manifest_is_pull_error(home, reg):
     with pytest.raises(PullError, match="404"):
         RegistryClient(home, scheme="http").fetch(Reference(reg.host, "lib/none", "latest"), Platform())

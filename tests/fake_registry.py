@@ -24,6 +24,7 @@ class FakeRegistry:
         self.manifests: dict[tuple[str, str], tuple[bytes, str]] = {}  # (repo, ref) -> (body, media type)
         self.requests: list[tuple[str, str, dict]] = []
         self.token = "test-token"
+        self.truncate: set[str] = set()  # digests to serve half of, while still declaring the full length
 
     def add_image(self, repo: str, tag: str, config: dict, layers: list[bytes], multi_arch: bool = False) -> str:
         config_bytes = json.dumps(config).encode()
@@ -79,6 +80,12 @@ class FakeRegistry:
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
+                if digest in reg.truncate:
+                    # Declare the full length but only write half, then drop the
+                    # connection: simulates a connection that dies mid-transfer.
+                    self.wfile.write(data[: len(data) // 2])
+                    self.close_connection = True
+                    return
                 self.wfile.write(data)
 
         class ApiHandler(BaseHTTPRequestHandler):
