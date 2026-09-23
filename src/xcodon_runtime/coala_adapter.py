@@ -16,6 +16,8 @@ from typing import Dict, Optional, Sequence, Union
 from xcodon_runtime.api import Runtime
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import Bind
+from xcodon_runtime.errors import XcodonError
+from xcodon_runtime.keeper import KEEPER_LOG
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +25,16 @@ log = logging.getLogger(__name__)
 async def _call(fn, *args, **kwargs):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
+
+
+def _read_log_tail(container: Container, tail: int) -> str:
+    if tail <= 0:
+        return ""
+    path = container.dir / KEEPER_LOG
+    if not path.exists():
+        return ""
+    lines = path.read_text(errors="replace").splitlines()
+    return "\n".join(lines[-tail:])
 
 
 class XcodonContainerManager:
@@ -46,10 +58,12 @@ class XcodonContainerManager:
         environment: Optional[Dict[str, str]] = None,
         name: Optional[str] = None,
     ) -> Container:
-        binds = [
-            Bind(host, spec["bind"], (spec.get("mode") or "rw").lower() == "ro")
-            for host, spec in (volumes or {}).items()
-        ]
+        binds = []
+        for host, spec in (volumes or {}).items():
+            target = spec.get("bind")
+            if not isinstance(target, str):
+                raise XcodonError(f"volume for {host!r} needs a 'bind' container path")
+            binds.append(Bind(host, target, (spec.get("mode") or "rw").lower() == "ro"))
         # The container's main command is never run: the keeper holds the container and
         # every call goes through exec. A harmless default keeps images without CMD usable.
         argv = ["/bin/sh"] if command is None else (["/bin/sh", "-c", command] if isinstance(command, str) else list(command))
@@ -75,11 +89,7 @@ class XcodonContainerManager:
         return result.code, result.stdout, result.stderr
 
     async def get_logs(self, container: Container, tail: int = 1000) -> str:
-        path = container.dir / "keeper.log"
-        if not path.exists():
-            return ""
-        lines = path.read_text(errors="replace").splitlines()
-        return "\n".join(lines[-tail:] if tail > 0 else lines)
+        return await _call(_read_log_tail, container, tail)
 
     async def remove_container(self, container: Container, force: bool = True) -> None:
         await _call(self.runtime.remove, container, force=force)

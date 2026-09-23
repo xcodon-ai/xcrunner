@@ -2,7 +2,10 @@ import asyncio
 
 import pytest
 
+from xcodon_runtime.api import Runtime
 from xcodon_runtime.coala_adapter import XcodonContainerManager
+from xcodon_runtime.errors import XcodonError
+from xcodon_runtime.keeper import KEEPER_LOG
 
 
 @pytest.fixture
@@ -58,5 +61,58 @@ def test_cleanup_all(manager):
         await manager.cleanup_all()
         assert manager.containers == {}
         assert manager.runtime.containers(all=True) == []
+
+    asyncio.run(flow())
+
+
+def test_create_container_volume_without_bind_raises(manager):
+    async def flow():
+        with pytest.raises(XcodonError):
+            await manager.create_container("xcodon-test/busybox:latest", volumes={"/tmp": {"mode": "ro"}})
+
+    asyncio.run(flow())
+
+
+def test_get_logs_ns_vs_proot(manager, engine_name):
+    """The ns engine keeps a keeper log per container; the proot engine keeps none."""
+
+    async def flow():
+        c = await manager.create_container("xcodon-test/busybox:latest")
+        await manager.start_container(c)
+        log_path = c.dir / KEEPER_LOG
+        if engine_name == "ns":
+            assert log_path.exists()
+            with open(log_path, "a") as f:
+                f.write("line one\nline two\npid 4242\n")
+            logs = await manager.get_logs(c)
+            assert "pid 4242" in logs
+            assert logs.splitlines()[-1] == "pid 4242"
+            assert await manager.get_logs(c, tail=1) == "pid 4242"
+            assert await manager.get_logs(c, tail=0) == ""
+        else:
+            assert not log_path.exists()
+            assert await manager.get_logs(c) == ""
+        await manager.remove_container(c)
+
+    asyncio.run(flow())
+
+
+def test_cleanup_all_continues_after_one_failure(manager, monkeypatch):
+    async def flow():
+        a = await manager.create_container("xcodon-test/busybox:latest")
+        b = await manager.create_container("xcodon-test/busybox:latest")
+        original_remove = Runtime.remove
+
+        def flaky_remove(self, container, force=False):
+            if container.id == a.id:
+                raise XcodonError("boom: simulated removal failure")
+            return original_remove(self, container, force=force)
+
+        monkeypatch.setattr(Runtime, "remove", flaky_remove)
+
+        await manager.cleanup_all()  # must not raise, even though removing `a` fails
+
+        assert a.id in manager.containers
+        assert b.id not in manager.containers
 
     asyncio.run(flow())
