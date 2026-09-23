@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
+import io
+import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -85,3 +90,59 @@ def pytest_collection_modifyitems(config, items):
 
             if find_proot() is None:
                 item.add_marker(pytest.mark.skip(reason="no proot binary"))
+
+
+def _ns_available() -> bool:
+    from xcodon_runtime.probe import run_probes
+
+    return all(v["ok"] for v in run_probes().values())
+
+
+def _proot_available() -> bool:
+    from xcodon_runtime.engine_proot import find_proot
+
+    return find_proot() is not None
+
+
+@pytest.fixture(params=["ns", "proot"])
+def engine_name(request) -> str:
+    name = request.param
+    if name == "ns" and not _ns_available():
+        pytest.skip("ns engine unavailable on this host")
+    if name == "proot" and not _proot_available():
+        pytest.skip("no proot binary")
+    return name
+
+
+def pack_rootfs_as_image(home: RuntimeHome, rootfs: Path, ref: str, config: dict | None = None):
+    """Import a directory as a one-layer image into ``home`` under ``ref``. Returns the Image."""
+    from xcodon_runtime.imagestore import ImageStore
+    from xcodon_runtime.registry import FetchedImage, FetchedLayer
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        t.add(rootfs, arcname=".")
+    raw = buf.getvalue()
+    gz = gzip.compress(raw)
+    blob = home.blobs / hashlib.sha256(gz).hexdigest()
+    blob.write_bytes(gz)
+    cfg = {
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {"Env": ["PATH=/bin"], "Cmd": ["/bin/sh"], "WorkingDir": "/workspace"},
+        "rootfs": {"type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(raw).hexdigest()]},
+    }
+    if config:
+        cfg["config"].update(config)
+    cbytes = json.dumps(cfg).encode()
+    fetched = FetchedImage("sha256:" + hashlib.sha256(cbytes).hexdigest(), cfg,
+                           [FetchedLayer("sha256:" + hashlib.sha256(gz).hexdigest(), "tar+gzip", len(gz), blob)],
+                           source="test")
+    from xcodon_runtime.reference import parse_reference
+
+    return ImageStore(home, sources=[]).import_fetched(fetched, parse_reference(ref).name)
+
+
+@pytest.fixture
+def busybox_image(home, busybox_rootfs):
+    return pack_rootfs_as_image(home, busybox_rootfs, "xcodon-test/busybox:latest")
