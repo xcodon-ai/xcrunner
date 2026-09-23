@@ -18,7 +18,8 @@ Two engines, chosen automatically:
 
 Optional: `pip install 'xcodon-runtime[zstd]'` for zstd-compressed layers.
 On aarch64 hosts without user namespaces, provide a PRoot binary with
-`XCODON_PROOT=/path/to/proot`.
+`XCODON_PROOT=/path/to/proot`. The command is also installed as
+`xcodon-runtime` for hosts where another program is already named `xcodon`.
 
 ## Use
 

@@ -34,8 +34,15 @@ TOOL = textwrap.dedent(
 
 def test_cwltool_runs_a_tool_through_xcodon(home, busybox_image, engine_name, tmp_path):
     (tmp_path / "echo.cwl").write_text(TOOL)
-    xcodon = shutil.which("xcodon") or os.path.join(os.path.dirname(sys.executable), "xcodon")
-    assert os.path.exists(xcodon), "install the package so the xcodon script exists"
+    # Prefer the interpreter's own bin directory: shutil.which("xcodon") can resolve to an
+    # unrelated program of the same name earlier on PATH (seen on a host that also has an
+    # unrelated "xcodon" package installed system-wide). Only fall back to PATH search if
+    # this venv has no xcodon script of its own (e.g. running against a non-editable install
+    # laid out differently).
+    xcodon = os.path.join(os.path.dirname(sys.executable), "xcodon")
+    if not os.path.exists(xcodon):
+        xcodon = shutil.which("xcodon")
+    assert xcodon and os.path.exists(xcodon), "install the package so the xcodon script exists"
     env = {**os.environ, "XCODON_RUNTIME_HOME": str(home.path), "XCODON_ENGINE": engine_name}
     r = subprocess.run(
         ["cwltool", "--user-space-docker-cmd", xcodon, "--outdir", str(tmp_path / "out"),

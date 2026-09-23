@@ -1,11 +1,12 @@
 import json
 import logging
+import os
 import subprocess
 import sys
 
 import pytest
 
-from xcodon_runtime import cli
+from xcodon_runtime import __version__, cli
 from xcodon_runtime.engine import Bind
 
 
@@ -150,3 +151,13 @@ def test_verbosity_resets_between_invocations(home, capsys):
 def test_console_script_entry_point():
     r = subprocess.run([sys.executable, "-m", "xcodon_runtime.cli", "--help"], capture_output=True, text=True)
     assert r.returncode == 0 and "pull" in r.stdout
+
+
+def test_xcodon_runtime_alias_console_script():
+    """A second console script with the same entry point as `xcodon`, for hosts where some
+    other program already owns the name `xcodon`."""
+    exe = os.path.join(os.path.dirname(sys.executable), "xcodon-runtime")
+    assert os.path.exists(exe), "install the package so the xcodon-runtime script exists"
+    r = subprocess.run([exe, "--version"], capture_output=True, text=True)
+    assert r.returncode == 0
+    assert __version__ in r.stdout

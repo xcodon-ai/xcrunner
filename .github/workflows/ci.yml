@@ -14,5 +14,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y busybox-static
       - run: pip install -e ".[dev,zstd]"
       - run: xcodon info
-      - run: pytest -q
-      - run: XCODON_TEST_NETWORK=1 pytest -q -m network
+      # cwltool is not installed in this job, so the cwltool-marked tests skip by design.
+      - run: pytest -q -rs
+      - run: XCODON_TEST_NETWORK=1 pytest -q -rs -m network
