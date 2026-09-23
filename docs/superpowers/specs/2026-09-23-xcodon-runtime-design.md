@@ -10,7 +10,8 @@ images that coala and coala-runtime already use, on hosts where Docker is not
 available and the user has no root. It works on two kinds of hosts:
 
 - Linux with unprivileged user namespaces (workstations, cloud VMs, most
-  current HPC nodes). Uses kernel namespaces, overlayfs, and bwrap.
+  current HPC nodes). Uses kernel namespaces and overlayfs directly, with no
+  helper binary.
 - Linux with user namespaces disabled (locked-down HPC). Uses a vendored PRoot
   binary and ptrace.
 
@@ -66,8 +67,8 @@ Data flow for `xcodon run IMAGE CMD`:
 
 Dependencies: Python 3.10 or newer, Linux. No required third-party Python
 packages. Optional extra `zstd` installs `zstandard` for zstd-compressed
-layers. bwrap is used from PATH or from `<runtime home>/bin/bwrap`. PRoot
-static binaries are vendored in the wheel.
+layers. The ns engine needs only the kernel. PRoot static binaries for the
+proot engine are vendored in the wheel.
 
 ## 3. Image store
 
@@ -123,7 +124,6 @@ uncompressed tar. The legacy `manifest.json` in the same archive is ignored.
   refs.json                  "docker.io/library/python:3.12" -> image id
   containers/<id>/           see section 4
   locks/                     flock files for layers and images
-  bin/                       optional user-provided bwrap
 ```
 
 The image id is the SHA-256 digest of the config blob, as in docker. Layers are
@@ -201,8 +201,7 @@ containers/<id>/
   upper/  work/  writable layer and overlay work dir          (ns engine)
   merged/        overlay mount point, empty when not running    (ns engine)
   rootfs/        full copy of the image rootfs                (proot engine)
-  keeper.pid     pid and start time of the keeper             (ns engine)
-  sandbox.pid    pid of the sandbox init reported by bwrap    (ns engine)
+  keeper.pid     pid and start time of the sandbox init       (ns engine)
   keeper.log     keeper stderr                                (ns engine)
 ```
 
@@ -246,54 +245,70 @@ no network namespace and DNS must keep working.
 
 ### 4.4 ns engine
 
-`start` forks a keeper process. In Python, using ctypes for the three system
-calls, the keeper:
+The keeper is a Python process that builds the sandbox with system calls and
+then blocks inside it forever. It uses ctypes for `unshare`, `mount`,
+`umount2`, `pivot_root`, `sethostname`, and `setns`. No external binary is
+involved.
+
+`start` forks the keeper. The keeper, in order:
 
 1. Calls `unshare(CLONE_NEWUSER | CLONE_NEWNS)`.
 2. Writes `deny` to `/proc/self/setgroups`, then `<uid> <host uid> 1` to
    `/proc/self/uid_map` and `<gid> <host gid> 1` to `/proc/self/gid_map`.
    This single-line self mapping needs no `newuidmap` and no capabilities.
-3. Mounts overlayfs on `containers/<id>/merged` with the image rootfs as
+3. Makes mount propagation private with `mount(NULL, "/", NULL,
+   MS_REC | MS_PRIVATE)`, so nothing it mounts leaks to the host.
+4. Mounts overlayfs on `containers/<id>/merged` with the image rootfs as
    `lowerdir`, `upper/` as `upperdir`, and `work/` as `workdir`. The kernel
    allows this inside a user namespace since 5.11.
-4. Execs bwrap:
+5. Calls `unshare(CLONE_NEWPID | CLONE_NEWUTS)` and forks. The parent writes
+   the child pid to the info pipe and exits. The child is pid 1 of the new pid
+   namespace and continues.
+6. Mounts a tmpfs on `merged/dev`, then bind-mounts the host `/dev/null`,
+   `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, and `/dev/tty`
+   onto empty files inside it. Mounts `devpts` on `merged/dev/pts` with
+   `newinstance,ptmxmode=0666,mode=0620` and symlinks `ptmx` to `pts/ptmx`.
+   Mounts a tmpfs on `merged/dev/shm`. Symlinks `fd`, `stdin`, `stdout`, and
+   `stderr` to `/proc/self/fd` entries.
+7. Mounts `proc` on `merged/proc`. This is allowed because the keeper owns a
+   fresh pid namespace.
+8. Bind-mounts the host `/sys` read-only on `merged/sys`.
+9. Bind-mounts `/etc/resolv.conf` and `/etc/hosts` read-only, then each bind
+   from the container config, read-only when asked. Missing mount points are
+   created in the writable layer first, files for files and directories for
+   directories.
+10. Calls `pivot_root(merged, merged/<old root dir>)`, changes directory to
+    `/`, and unmounts the old root with `MNT_DETACH`.
+11. Sets the hostname to the first 12 characters of the container id.
+12. Redirects its stdout and stderr to `keeper.log`, installs a SIGCHLD
+    handler that reaps every zombie with `waitpid(-1, WNOHANG)`, installs a
+    SIGTERM handler that exits, and blocks in `signal.pause()` in a loop.
 
-```
-bwrap --bind <merged> / --proc /proc --dev /dev --ro-bind /sys /sys
-      --ro-bind /etc/resolv.conf /etc/resolv.conf --ro-bind /etc/hosts /etc/hosts
-      [--bind|--ro-bind <host> <guest> ...]
-      --unshare-pid --unshare-uts --hostname <id12>
-      --ro-bind <vendored pause> /.xcodon/pause
-      --die-with-parent --info-fd <fd>
-      /.xcodon/pause
-```
+The keeper keeps running after `pivot_root` even though the new root has no
+Python. Its code and libraries are already mapped in memory. Open file
+descriptors other than the log and the info pipe are closed before step 10.
 
-bwrap runs as the mapped root of the new user namespace, so it does not need
-`--unshare-user`. It writes `{"child-pid": N}` to the info fd. `start` reads it
-and records the keeper pid, its start time from `/proc/<pid>/stat`, and the
-sandbox pid. `start` returns once the info fd has been read, or fails with the
-keeper's stderr if the keeper exits first.
+`start` reads the pid-1 pid from the info pipe and records it in
+`keeper.pid` with its start time from `/proc/<pid>/stat`. `start` fails with
+the keeper's log if the pipe closes before a pid arrives. Because the keeper
+is pid 1 of its pid namespace, killing it kills every process in the
+sandbox, and the overlay unmounts when the last process leaves the mount
+namespace.
 
-`exec` forks a child. The child opens `/proc/<sandbox pid>/ns/{user,mnt,pid,uts}`,
+`exec` forks a child. The child opens `/proc/<keeper pid>/ns/{user,mnt,pid,uts}`,
 calls `setns` on each in that order, forks again so the grandchild is inside
 the pid namespace, changes to `workdir`, and calls `execve(argv, env)`. The
 parent waits and returns the exit code. Stdio is inherited, so stdin, stdout,
 and stderr stream through. A missing `/proc/<pid>` or `ESRCH` from `setns`
-raises `ContainerNotRunning` and marks the container `exited`.
+raises `ContainerNotRunning` and marks the container `exited`. The exec child
+sets `PR_SET_NO_NEW_PRIVS` before `execve` so a setuid binary in the image
+cannot change credentials.
 
 `stop` sends SIGTERM to the keeper, waits up to two seconds, then SIGKILL.
-When the keeper dies, `--die-with-parent` kills the sandbox and the overlay
-unmounts with its mount namespace.
 
 Liveness: a container is running when `keeper.pid` names a live process whose
 start time in `/proc/<pid>/stat` matches the recorded one. This survives pid
 reuse after a reboot.
-
-The keeper's sandbox process is `xcodon-pause`, a static C program of a
-few lines that blocks in `pause()` forever. It is vendored next to PRoot and
-bound read-only into the sandbox, so the keeper does not depend on the image
-containing `sleep` or any shell. Distroless images work the same as full
-ones.
 
 ### 4.5 proot engine
 
@@ -323,14 +338,14 @@ kernels where it misbehaves.
 
 Computed on each invocation unless `XCODON_ENGINE=ns|proot` is set. The ns
 engine is selected when all three probes pass, each in a short-lived child
-process:
+process that unshares user and mount namespaces:
 
 1. `unshare(CLONE_NEWUSER | CLONE_NEWNS)` succeeds and the uid map can be
    written.
 2. An overlayfs mount succeeds inside that namespace on a temporary
    directory.
-3. bwrap is found on PATH or at `<runtime home>/bin/bwrap` and `bwrap
-   --version` runs.
+3. `unshare(CLONE_NEWPID)` followed by a `proc` mount succeeds. Some
+   hardened kernels allow user namespaces but not this.
 
 Otherwise the proot engine is selected, and one log line at info level names
 the failed probe. `xcodon info` prints all probe results. A container records
@@ -433,10 +448,9 @@ Locally built `coala-runtime-python:latest` images work because
 ### 5.5 Distribution
 
 `pyproject.toml` with hatchling. Console script `xcodon`. Vendored binaries
-under `xcodon_runtime/_bin/`: `proot-x86_64`, `proot-aarch64`,
-`xcodon-pause-x86_64`, `xcodon-pause-aarch64`, `MANIFEST` with version and
-SHA-256 for each, and the PRoot license. PRoot comes from the proot-me
-GitHub release static builds. Total under 4 MB.
+under `xcodon_runtime/_bin/`: `proot-x86_64`, `proot-aarch64`, `MANIFEST`
+with version and SHA-256 for each, and the PRoot license. PRoot comes from
+the proot-me GitHub release static builds. Total under 4 MB.
 
 ## 6. Known limits
 
@@ -447,7 +461,7 @@ GitHub release static builds. Total under 4 MB.
 - Host network only. `--net=none` is ignored.
 - No cgroups. Resource flags are ignored with a warning.
 - Device nodes, sockets, and fifos inside images are skipped at extraction.
-  `/dev` inside the sandbox comes from bwrap or the host bind.
+  `/dev` inside the sandbox is built by the keeper from host device binds.
 - proot engine: slower on syscall-heavy programs, no hostname or pid
   isolation, and container creation costs a full copy on filesystems without
   reflinks.
@@ -493,6 +507,8 @@ Unit tests, no network and no namespaces:
 - `--mount` CSV and `-v` parsing, ignored-flag warnings, unknown-flag error.
 - `docker save` loader against an OCI-layout tarball built in the test.
 - Engine selection with probe results stubbed.
+- Keeper mount plan: the ordered list of mount and bind operations the
+  keeper would perform, computed as data and checked without running it.
 - Lock behavior: a waiter skips work already done.
 
 Integration tests:
@@ -500,6 +516,10 @@ Integration tests:
 - One engine suite, parametrized over `ns` and `proot`: create, start, exec,
   a write that persists across exec, stop, start again, remove. Uses a tiny
   rootfs built in the test from host binaries, so no pull is needed.
+- `ns` keeper checks: inside the sandbox `/proc/self/status` shows pid 1 for
+  the keeper, `/dev/null` and `/dev/pts` work, `hostname` is the container
+  id, a zombie left by a backgrounded exec is reaped, the host mount table is
+  unchanged after `start`, and killing the keeper ends every sandbox process.
 - `network`: pull `busybox:latest` from Docker Hub, run `echo`.
 - `docker`: load an image from the local daemon and run it.
 - `cwltool`: run a CWL CommandLineTool with a DockerRequirement through
@@ -513,11 +533,16 @@ unit tier plus `ns`, `proot`, and `network`.
 
 ## 9. Decisions and alternatives considered
 
-- **bwrap plus in-process syscalls over an OCI runtime (crun, youki, runc).**
+- **In-process system calls over an OCI runtime (crun, youki, runc).**
   An OCI runtime gives multi-uid ownership and capabilities but needs a
   vendored runtime, a generated `config.json`, `newuidmap`, and an unverified
   rootless overlay path. The chosen approach was verified on this host and
   shares one image store and container layout with the proot engine.
+- **Python-native keeper over bwrap.** bwrap was verified to work as the
+  sandbox process, but it must be installed on the host, and its command must
+  exist inside the image, which distroless images break. Doing the mount setup
+  in the keeper itself removes both problems at the cost of about 200 lines
+  that follow bwrap's sequence. The exec path is unchanged either way.
 - **Own image store over uDocker.** uDocker is a large legacy dependency and
   stays on ptrace even where namespaces exist. cwltool already speaks to it,
   so wrapping it would add nothing for coala.
