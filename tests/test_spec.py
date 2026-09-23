@@ -90,3 +90,22 @@ def test_unknown_user_name_is_error(rootfs):
 def test_user_option_overrides_image(rootfs):
     s = build_spec({"config": {"User": "appuser"}}, rootfs, CID, command=["x"], user="0")
     assert (s.uid, s.gid) == (0, 0)
+
+
+def test_malformed_uid_in_passwd(rootfs):
+    (rootfs / "etc/passwd").write_text("baduser:x:notanumber:alsobad:Bad:/b:/bin/sh\n")
+    with pytest.raises(XcodonError, match="malformed"):
+        resolve_user("baduser", rootfs)
+
+
+def test_numeric_user_resolved_by_uid_not_name(rootfs):
+    (rootfs / "etc/passwd").write_text(
+        "1001:x:9999:9999:Name:/nine:/bin/sh\nreal:x:1001:1001:Real:/real:/bin/sh\n"
+    )
+    # Numeric "1001" should resolve to the row with uid=1001, not the row with name=1001
+    assert resolve_user("1001", rootfs) == (1001, 1001)
+    # Name "real" should resolve correctly
+    assert resolve_user("real", rootfs) == (1001, 1001)
+    # HOME should come from the correct row (uid=1001, not name=1001)
+    s = build_spec({"config": {"User": "1001"}}, rootfs, CID, command=["x"])
+    assert s.env["HOME"] == "/real"
