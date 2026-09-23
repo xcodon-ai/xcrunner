@@ -80,3 +80,21 @@ def test_prune_leftovers(home):
     removed = home.prune_leftovers()
     assert {p.name for p in removed} == {"x.tmp", "y.tmp", "z.part"}
     assert (home.layers / "keep").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="test requires non-root permissions")
+def test_prune_leftovers_does_not_report_stuck_dirs(home):
+    """Verify that prune_leftovers does not report paths it failed to remove."""
+    stuck = home.layers / "stuck.tmp"
+    stuck.mkdir()
+    (stuck / "file").write_text("content")
+    # Make directory unremovable: remove write permission so children cannot be unlinked
+    os.chmod(stuck, 0o500)
+    try:
+        removed = home.prune_leftovers()
+        # The stuck directory should still exist and should NOT be in the removed list
+        assert stuck.exists(), "stuck directory should still exist"
+        assert stuck not in removed, "stuck directory should not be reported as removed"
+    finally:
+        # Restore permissions so pytest can clean up
+        os.chmod(stuck, 0o700)

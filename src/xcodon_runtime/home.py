@@ -73,8 +73,10 @@ class RuntimeHome:
         for parent in (self.layers, self.images, self.containers):
             for p in parent.glob("*.tmp"):
                 shutil.rmtree(p, ignore_errors=True)
-                removed.append(p)
+                if not os.path.lexists(p):
+                    removed.append(p)
         for p in self.blobs.glob("*.part"):
             p.unlink(missing_ok=True)
-            removed.append(p)
+            if not p.exists():
+                removed.append(p)
         return removed
