@@ -58,3 +58,18 @@ def test_ensure_mountpoint_creates_dir_or_file(tmp_path):
     (tmp_path / "y/link").symlink_to("/nonexistent/target")
     sc.ensure_mountpoint("/etc/hosts", str(tmp_path / "y/link"))
     assert (tmp_path / "y/link").is_file() and not (tmp_path / "y/link").is_symlink()
+
+
+def test_ensure_mountpoint_replaces_file_with_dir_when_source_is_dir(tmp_path):
+    target = tmp_path / "wrongtype"
+    target.write_text("i am a file")
+    sc.ensure_mountpoint("/etc", str(target))
+    assert target.is_dir()
+
+
+def test_ensure_mountpoint_replaces_dir_with_file_when_source_is_file(tmp_path):
+    target = tmp_path / "wrongtype"
+    target.mkdir()
+    (target / "child").write_text("leftover")
+    sc.ensure_mountpoint("/etc/hosts", str(target))
+    assert target.is_file()

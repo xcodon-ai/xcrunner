@@ -6,6 +6,8 @@ import ctypes
 import errno
 import os
 import platform
+import shutil
+import stat
 
 _libc = ctypes.CDLL(None, use_errno=True)
 
@@ -125,10 +127,24 @@ def mount_flags_at(path: str) -> int:
 
 
 def ensure_mountpoint(source: str, target: str) -> None:
-    """Make ``target`` a directory or an empty file to match ``source``. Replaces a symlink."""
+    """Make ``target`` a directory or an empty file to match ``source``.
+
+    Replaces a symlink, and replaces an existing target of the wrong type
+    (a file where a directory is needed, or vice versa).
+    """
     if os.path.islink(target):
         os.unlink(target)
-    if os.path.isdir(source):
+    source_is_dir = os.path.isdir(source)
+    try:
+        target_is_dir = stat.S_ISDIR(os.lstat(target).st_mode)
+    except FileNotFoundError:
+        target_is_dir = None
+    if target_is_dir is not None and target_is_dir != source_is_dir:
+        if target_is_dir:
+            shutil.rmtree(target)
+        else:
+            os.unlink(target)
+    if source_is_dir:
         os.makedirs(target, exist_ok=True)
         return
     os.makedirs(os.path.dirname(target), exist_ok=True)
