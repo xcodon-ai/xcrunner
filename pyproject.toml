@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xcodon-runtime"
+version = "0.1.0"
+description = "Rootless container runtime for Docker images, built for coala"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+zstd = ["zstandard>=0.21"]
+dev = ["pytest>=8", "ruff>=0.4"]
+
+[project.scripts]
+xcodon = "xcodon_runtime.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xcodon_runtime"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "network: needs internet access",
+  "ns: needs unprivileged user namespaces and overlayfs",
+  "proot: needs a PRoot binary",
+  "docker: needs a local docker daemon",
+  "cwltool: needs cwltool installed",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
