@@ -1,0 +1,7 @@
+{
+  "proot-x86_64": {
+    "version": "v5.4.1",
+    "sha256": "19f44283f5c0e73091c60195f5fcd4f4c1165505e44410d434e2ab1b677c1a09",
+    "url": "https://github.com/proot-me/proot/releases/download/v5.4.1/proot"
+  }
+}

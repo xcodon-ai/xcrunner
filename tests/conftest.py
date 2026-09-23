@@ -81,11 +81,7 @@ def pytest_collection_modifyitems(config, items):
         if "network" in item.keywords and os.environ.get("XCODON_TEST_NETWORK") != "1":
             item.add_marker(pytest.mark.skip(reason="set XCODON_TEST_NETWORK=1 to run network tests"))
         if "proot" in item.keywords:
-            try:
-                from xcodon_runtime.engine_proot import find_proot
-            except ImportError:
-                item.add_marker(pytest.mark.skip(reason="engine_proot module not yet available (Task 11)"))
-                continue
+            from xcodon_runtime.engine_proot import find_proot
 
             if find_proot() is None:
                 item.add_marker(pytest.mark.skip(reason="no proot binary"))
