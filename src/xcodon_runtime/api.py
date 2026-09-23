@@ -185,15 +185,24 @@ class Runtime:
     def run(self, ref: str, command: Sequence[str] | None = None, entrypoint: Sequence[str] | None = None,
             binds: Sequence[Bind] = (), workdir: str | None = None, env: Mapping[str, str] | None = None,
             user: str | None = None, name: str | None = None, rm: bool = False, pull: str = "missing",
-            stdin=None, stdout=None, stderr=None) -> int:
+            cidfile: str | None = None, stdin=None, stdout=None, stderr=None) -> int:
         """Create, start, and wait for one container, forwarding SIGINT/SIGTERM to it.
 
         Signal forwarding only works when this is called from the main
         thread: installing a signal handler off the main thread raises
         ValueError, and ``run`` treats that as "no forwarding available"
         instead of failing.
+
+        When ``cidfile`` is given, the container id is written there right
+        after creation, before it starts.
         """
         c = self.create(ref, command, entrypoint, binds, workdir, env, user, name, pull)
+        if cidfile:
+            try:
+                with open(cidfile, "w") as f:
+                    f.write(c.id)
+            except OSError as e:
+                raise XcodonError(f"cannot write cidfile {cidfile}: {e}") from e
         started = False
         try:
             self.start(c)

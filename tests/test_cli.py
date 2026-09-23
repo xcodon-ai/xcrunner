@@ -1,4 +1,5 @@
 import json
+import logging
 import subprocess
 import sys
 
@@ -83,21 +84,23 @@ def test_info_prints_json(home, engine_name, capsys):
     assert json.loads(capsys.readouterr().out)["engine"] == engine_name
 
 
-def test_full_cli_flow(home, busybox_image, engine_name, capsys, tmp_path):
+def test_full_cli_flow(home, busybox_image, engine_name, capfd, tmp_path):
+    # capfd, not capsys: `exec` and `run` let the child inherit our real stdio (docker-style
+    # streaming), and capsys only sees writes made in-process through sys.stdout/sys.stderr.
     e = ["--engine", engine_name]
     assert cli.main([*e, "images"]) == 0
-    assert "xcodon-test/busybox:latest" in capsys.readouterr().out
+    assert "xcodon-test/busybox:latest" in capfd.readouterr().out
     assert cli.main([*e, "inspect", "xcodon-test/busybox"]) == 0
-    assert json.loads(capsys.readouterr().out)[0]["Config"]["Cmd"] == ["/bin/sh"]
+    assert json.loads(capfd.readouterr().out)[0]["Config"]["Cmd"] == ["/bin/sh"]
 
     assert cli.main([*e, "create", "--name", "c1", "xcodon-test/busybox", "/bin/sh"]) == 0
-    cid = capsys.readouterr().out.strip()
+    cid = capfd.readouterr().out.strip()
     assert len(cid) == 64
     assert cli.main([*e, "start", "c1"]) == 0
     assert cli.main([*e, "exec", "-w", "/tmp", "--env=Q=1", "c1", "/bin/sh", "-c", "pwd; echo $Q; exit 3"]) == 3
-    assert capsys.readouterr().out == "/tmp\n1\n"
+    assert capfd.readouterr().out == "/tmp\n1\n"
     assert cli.main([*e, "ps"]) == 0
-    assert "c1" in capsys.readouterr().out
+    assert "c1" in capfd.readouterr().out
     assert cli.main([*e, "stop", "c1"]) == 0
     assert cli.main([*e, "rm", "c1"]) == 0
 
@@ -111,8 +114,37 @@ def test_full_cli_flow(home, busybox_image, engine_name, capsys, tmp_path):
     assert (out / "f").read_text() == "hello cwl\n"
     assert len(cid_file.read_text().strip()) == 64
     assert cli.main([*e, "ps", "-a"]) == 0
-    assert len(capsys.readouterr().out.splitlines()) == 1, "run --rm must leave no container"
+    assert len(capfd.readouterr().out.splitlines()) == 1, "run --rm must leave no container"
     assert cli.main([*e, "prune"]) == 0
+
+
+def test_exec_dash_e_without_value_copies_host_env(home, busybox_image, engine_name, monkeypatch, capfd):
+    """`-e VAR` (no `=`) forwards our own environment's value, as docker does. `parse_run_args`
+    already worked this way for `run`/`create`; `cmd_exec` used to just set an empty string."""
+    monkeypatch.setenv("HOSTVAL", "yes")
+    e = ["--engine", engine_name]
+    assert cli.main([*e, "create", "--name", "c2", "xcodon-test/busybox", "/bin/sh"]) == 0
+    capfd.readouterr()
+    assert cli.main([*e, "start", "c2"]) == 0
+    assert cli.main([*e, "exec", "-e", "HOSTVAL", "c2", "/bin/sh", "-c", "echo $HOSTVAL"]) == 0
+    assert capfd.readouterr().out == "yes\n"
+    assert cli.main([*e, "stop", "c2"]) == 0
+    assert cli.main([*e, "rm", "c2"]) == 0
+
+
+def test_create_cidfile_error_exit_125(home, busybox_image, capsys):
+    code = cli.main(["create", "--cidfile=/nonexistent/dir/cid", "xcodon-test/busybox:latest"])
+    assert code == 125
+    assert "xcodon:" in capsys.readouterr().err
+
+
+def test_verbosity_resets_between_invocations(home, capsys):
+    """logging.basicConfig is a no-op after the first call unless forced, so a second main()
+    in the same process must not keep the first call's level."""
+    assert cli.main(["-vv", "info"]) == 0
+    assert logging.getLogger().level == logging.DEBUG
+    assert cli.main(["info"]) == 0
+    assert logging.getLogger().level == logging.WARNING
 
 
 def test_console_script_entry_point():

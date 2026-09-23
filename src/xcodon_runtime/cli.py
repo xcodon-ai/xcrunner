@@ -81,6 +81,21 @@ def _parse_volume(value: str) -> Bind:
     return Bind(os.path.abspath(parts[0]), parts[1], readonly)
 
 
+def _parse_env_item(item: str) -> tuple[str, str]:
+    """Split a `-e`/`--env` value. `-e K=V` sets V; `-e K` copies K from our own environment,
+    as docker does. Shared by ``parse_run_args`` and ``cmd_exec`` so both agree."""
+    k, sep, v = item.partition("=")
+    return k, v if sep else os.environ.get(k, "")
+
+
+def _write_cidfile(path: str, cid: str) -> None:
+    try:
+        with open(path, "w") as f:
+            f.write(cid)
+    except OSError as e:
+        raise XcodonError(f"cannot write cidfile {path}: {e}") from e
+
+
 def parse_run_args(tokens: list[str]) -> RunOptions:
     """Hand-rolled so that everything after IMAGE is the command, as docker does."""
     opts = RunOptions()
@@ -116,8 +131,8 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
         elif flag in ("-w", "--workdir"):
             opts.workdir = value
         elif flag in ("-e", "--env"):
-            k, _, v = value.partition("=")
-            opts.env[k] = v if _ else os.environ.get(k, "")
+            k, v = _parse_env_item(value)
+            opts.env[k] = v
         elif flag == "--entrypoint":
             opts.entrypoint = [value] if value else []
         elif flag in ("-u", "--user"):
@@ -201,23 +216,9 @@ def cmd_run(rt: Runtime, args) -> int:
         return 0
     opts = parse_run_args(args.rest)
     _warn_ignored(opts)
-    c = rt.create(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
-                  workdir=opts.workdir, env=opts.env, user=opts.user, name=opts.name, pull=opts.pull)
-    if opts.cidfile:
-        with open(opts.cidfile, "w") as f:
-            f.write(c.id)
-    try:
-        rt.start(c)
-        p = rt.popen(c)
-        return p.wait()
-    except KeyboardInterrupt:
-        return 130
-    finally:
-        try:
-            rt.stop(c)
-        finally:
-            if opts.rm:
-                rt.store.remove(c)
+    return rt.run(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
+                  workdir=opts.workdir, env=opts.env, user=opts.user, name=opts.name, rm=opts.rm,
+                  pull=opts.pull, cidfile=opts.cidfile)
 
 
 def cmd_create(rt: Runtime, args) -> int:
@@ -229,8 +230,7 @@ def cmd_create(rt: Runtime, args) -> int:
     c = rt.create(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
                   workdir=opts.workdir, env=opts.env, user=opts.user, name=opts.name, pull=opts.pull)
     if opts.cidfile:
-        with open(opts.cidfile, "w") as f:
-            f.write(c.id)
+        _write_cidfile(opts.cidfile, c.id)
     print(c.id)
     return 0
 
@@ -243,15 +243,11 @@ def cmd_start(rt: Runtime, args) -> int:
 def cmd_exec(rt: Runtime, args) -> int:
     env = {}
     for item in args.env or []:
-        k, _, v = item.partition("=")
+        k, v = _parse_env_item(item)
         env[k] = v
     c = rt.get_container(args.container)
-    # Captured (not streamed live) so the output survives even when our own
-    # stdout has been redirected in-process, e.g. under a test harness.
-    result = rt.exec(c, args.command or None, workdir=args.workdir, env=env)
-    sys.stdout.buffer.write(result.stdout)
-    sys.stderr.buffer.write(result.stderr)
-    return result.code
+    p = rt.popen(c, args.command or None, workdir=args.workdir, env=env)
+    return p.wait()
 
 
 def cmd_stop(rt: Runtime, args) -> int:
@@ -363,7 +359,8 @@ def _configure_logging(verbosity: int) -> None:
         level = logging.DEBUG
     elif verbosity == 1 or env_level == "info":
         level = logging.INFO
-    logging.basicConfig(level=level, format="xcodon: %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+    logging.basicConfig(level=level, format="xcodon: %(levelname)s %(name)s: %(message)s", stream=sys.stderr,
+                        force=True)
 
 
 def main(argv: list[str] | None = None) -> int:
