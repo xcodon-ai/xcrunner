@@ -291,13 +291,16 @@ involved.
     replacing an entry of the wrong type. Creates the working directory.
 11. Unmounts the old root with `MNT_DETACH`, removes its directory, and sets
     the hostname to the first 12 characters of the container id.
-12. Redirects its stdout and stderr to `keeper.log`, installs a SIGCHLD
-    handler that reaps every zombie with `waitpid(-1, WNOHANG)`, installs a
-    SIGTERM handler that exits, and blocks in `signal.pause()` in a loop.
+12. Installs a SIGCHLD handler that reaps every zombie with
+    `waitpid(-1, WNOHANG)`, installs a SIGTERM handler that exits, and blocks
+    in `signal.pause()` in a loop. Its stdout and stderr were pointed at
+    `keeper.log` by `start` when the process was launched.
 
 The keeper keeps running after `pivot_root` even though the new root has no
-Python. Its code and libraries are already mapped in memory. Open file
-descriptors other than the log and the info pipe are closed before step 10.
+Python. Its code and libraries are already mapped in memory, but nothing
+may be imported lazily after the pivot, so the keeper warms the one codec the
+mount helpers need before step 6. The launcher opens no descriptors for the
+keeper other than the log and the info pipe.
 
 `start` reads the pid line and waits for the `ready` line, then records the pid in
 `keeper.pid` with its start time from `/proc/<pid>/stat`. `start` fails with
