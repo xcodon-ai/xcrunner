@@ -1,0 +1,18 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y busybox-static
+      - run: pip install -e ".[dev,zstd]"
+      - run: xcodon info
+      - run: pytest -q
+      - run: XCODON_TEST_NETWORK=1 pytest -q -m network
