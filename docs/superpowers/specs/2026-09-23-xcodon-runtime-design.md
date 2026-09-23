@@ -262,8 +262,9 @@ involved.
    `lowerdir`, `upper/` as `upperdir`, and `work/` as `workdir`. The kernel
    allows this inside a user namespace since 5.11.
 5. Calls `unshare(CLONE_NEWPID | CLONE_NEWUTS)` and forks. The parent writes
-   the child pid to the info pipe and exits. The child is pid 1 of the new pid
-   namespace and continues.
+   `pid <child pid>` to the info pipe and exits. The child is pid 1 of the new
+   pid namespace and continues. It writes `ready` to the same pipe only after
+   step 11, so `start` never returns while mounts are half built.
 6. Mounts a tmpfs on `merged/dev`, then bind-mounts the host `/dev/null`,
    `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, and `/dev/tty`
    onto empty files inside it. Mounts `devpts` on `merged/dev/pts` with
@@ -272,7 +273,10 @@ involved.
    `stderr` to `/proc/self/fd` entries.
 7. Mounts `proc` on `merged/proc`. This is allowed because the keeper owns a
    fresh pid namespace.
-8. Bind-mounts the host `/sys` read-only on `merged/sys`.
+8. Bind-mounts the host `/sys` read-only on `merged/sys`. A read-only
+   remount inside a user namespace must repeat the source mount's locked
+   flags (nosuid, nodev, noexec, atime flags), read from
+   `/proc/self/mountinfo`, or the kernel refuses it with EPERM.
 9. Bind-mounts `/etc/resolv.conf` and `/etc/hosts` read-only, then each bind
    from the container config, read-only when asked. Missing mount points are
    created in the writable layer first, files for files and directories for
@@ -288,15 +292,17 @@ The keeper keeps running after `pivot_root` even though the new root has no
 Python. Its code and libraries are already mapped in memory. Open file
 descriptors other than the log and the info pipe are closed before step 10.
 
-`start` reads the pid-1 pid from the info pipe and records it in
+`start` reads the pid line and waits for the `ready` line, then records the pid in
 `keeper.pid` with its start time from `/proc/<pid>/stat`. `start` fails with
 the keeper's log if the pipe closes before a pid arrives. Because the keeper
 is pid 1 of its pid namespace, killing it kills every process in the
 sandbox, and the overlay unmounts when the last process leaves the mount
 namespace.
 
-`exec` forks a child. The child opens `/proc/<keeper pid>/ns/{user,mnt,pid,uts}`,
-calls `setns` on each in that order, forks again so the grandchild is inside
+`exec` forks a child. The child opens all four of
+`/proc/<keeper pid>/ns/{user,mnt,pid,uts}` first, because after entering the
+mount namespace `/proc` is the sandbox's own, then calls `setns` on each in
+that order, forks again so the grandchild is inside
 the pid namespace, changes to `workdir`, and calls `execve(argv, env)`. The
 parent waits and returns the exit code. Stdio is inherited, so stdin, stdout,
 and stderr stream through. A missing `/proc/<pid>` or `ESRCH` from `setns`
@@ -329,10 +335,12 @@ proot -r <rootfs> -w <workdir> -i <uid>:<gid>
 Environment is passed through the process environment. Writes go straight
 into `rootfs/`, which is the persistent layer. `stop` is a no-op.
 
-PRoot lookup order: `XCODON_PROOT` if set, else the vendored
-`xcodon_runtime/_bin/proot-<arch>` for x86_64 or aarch64. `XCODON_PROOT_ARGS`
-appends extra flags, which lets a user turn seccomp acceleration off on
-kernels where it misbehaves.
+PRoot lookup order: `XCODON_PROOT` if set, else `proot` on PATH, else the
+vendored `xcodon_runtime/_bin/proot-x86_64`. The PRoot project publishes a
+static build only for x86_64, so aarch64 hosts must supply their own binary
+through `XCODON_PROOT` or PATH. `XCODON_PROOT_ARGS` appends extra flags,
+which lets a user turn seccomp acceleration off on kernels where it
+misbehaves.
 
 ### 4.6 Engine selection
 
@@ -448,9 +456,10 @@ Locally built `coala-runtime-python:latest` images work because
 ### 5.5 Distribution
 
 `pyproject.toml` with hatchling. Console script `xcodon`. Vendored binaries
-under `xcodon_runtime/_bin/`: `proot-x86_64`, `proot-aarch64`, `MANIFEST`
-with version and SHA-256 for each, and the PRoot license. PRoot comes from
-the proot-me GitHub release static builds. Total under 4 MB.
+under `xcodon_runtime/_bin/`: `proot-x86_64`, `MANIFEST` with version and
+SHA-256, and the PRoot license (GPL-2.0, distributed alongside this MIT
+project as a separate program). PRoot comes from the proot-me GitHub release
+v5.4.1 static build. Total under 2 MB.
 
 ## 6. Known limits
 
