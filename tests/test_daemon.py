@@ -182,3 +182,33 @@ def test_daemon_source_fetch_reports_stderr_on_error(home, tmp_path):
     src = DaemonSource(home, docker=str(fake))
     with pytest.raises(PullError, match="boom error message"):
         src.fetch(Reference("docker.io", "library/test", "latest"), Platform())
+
+
+def test_daemon_source_fetch_reports_the_reader_error_when_docker_is_silent(home, tmp_path):
+    """docker save can fail with an empty stderr; then the reader's error is all there is."""
+    data, _ = oci_layout_tar()
+    buf = io.BytesIO(data)
+    out = io.BytesIO()
+    with tarfile.open(fileobj=buf) as src, tarfile.open(fileobj=out, mode="w") as dst:
+        for m in src:
+            if m.name in ("index.json", "./index.json"):
+                continue
+            content = src.extractfile(m).read() if m.isfile() else None
+            if content is not None:
+                m.size = len(content)
+                dst.addfile(m, io.BytesIO(content))
+            else:
+                dst.addfile(m)
+    partial = tmp_path / "partial.tar"
+    partial.write_bytes(out.getvalue())
+    fake = tmp_path / "docker"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        f"  save) cat {partial}; exit 1;;\n"
+        "esac\nexit 2\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    src = DaemonSource(home, docker=str(fake))
+    with pytest.raises(PullError, match="no index.json"):
+        src.fetch(Reference("docker.io", "library/test", "latest"), Platform())

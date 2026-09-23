@@ -10,6 +10,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from xcodon_runtime.errors import XcodonError
+
 
 def default_home() -> Path:
     env = os.environ.get("XCODON_RUNTIME_HOME")
@@ -22,6 +24,12 @@ class RuntimeHome:
     def __init__(self, path: Path | str | None = None) -> None:
         self.path = Path(path) if path else default_home()
         self.path = self.path.expanduser().resolve()
+        if "," in str(self.path) or ":" in str(self.path):
+            raise XcodonError(
+                f"runtime home {self.path} contains ',' or ':'; overlayfs mount options "
+                "separate their fields with those characters and cannot quote them. "
+                "Set XCODON_RUNTIME_HOME to a path without them."
+            )
         self.blobs = self.path / "blobs" / "sha256"
         self.layers = self.path / "layers"
         self.images = self.path / "images"

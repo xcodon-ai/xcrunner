@@ -37,7 +37,9 @@ def _apply_dir(src: Path, dst: Path) -> None:
     names = {e.name for e in entries}
 
     if OPAQUE in names:
-        for child in os.scandir(dst):
+        # Materialize the listing: removing children while scanning the same
+        # directory can skip entries.
+        for child in list(os.scandir(dst)):
             _remove(Path(child.path))
 
     for e in entries:

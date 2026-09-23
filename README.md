@@ -30,6 +30,13 @@ On aarch64 hosts without user namespaces, provide a PRoot binary with
     xcodon exec dev pip install numpy      # persists in the container's writable layer
     xcodon exec dev python -c 'import numpy'
     xcodon stop dev && xcodon rm dev
+    xcodon logs dev                        # the ns engine's keeper log
+    xcodon rmi python:3.12-slim            # drop a tag, and the image with its last tag
+    xcodon prune                           # leftovers: half-built dirs and orphan blobs
+    xcodon prune --all                     # also unused layers and day-old exited containers
+
+Two global flags come before the subcommand: `--engine ns|proot` forces an
+engine, and `--home DIR` picks the state directory for this one command.
 
 Images already in a local Docker daemon are reused through `docker save`, so
 locally built images work without a registry.
@@ -51,6 +58,8 @@ locally built images work without a registry.
 - Host network only. No `--net=none`, no port mapping.
 - No cgroups. `--memory` and `--cpus` are accepted and ignored with a warning.
 - No GPU passthrough.
+- Read-only binds apply to the top mount only; submounts under a bound host
+  path stay writable.
 
 ## coala
 

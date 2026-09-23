@@ -216,7 +216,9 @@ Output: argv, env, workdir, uid, gid.
 
 - argv: if `--entrypoint` is given it replaces the image ENTRYPOINT. If a
   command is given it replaces the image CMD. argv is entrypoint followed by
-  cmd. Empty argv is an error.
+  cmd. Empty argv is an error. A non-empty entrypoint override with no
+  command discards the image CMD; an empty override (`--entrypoint=`) keeps
+  it.
 - env: start from image ENV. Set `HOSTNAME` to the first 12 characters of the
   container id. If `HOME` is missing, look up the uid in the rootfs
   `/etc/passwd`; fall back to `/root` for uid 0 and `/` otherwise. Apply
@@ -234,10 +236,14 @@ Output: argv, env, workdir, uid, gid.
 class Engine(Protocol):
     name: str
     def start(self, container: Container) -> None: ...
-    def exec(self, container: Container, argv: list[str], env: dict[str, str],
-             workdir: str, stdin, stdout, stderr) -> int: ...
+    def popen(self, container: Container, argv: list[str], env: dict[str, str],
+              workdir: str, **popen_kwargs) -> subprocess.Popen: ...
     def stop(self, container: Container) -> None: ...
+    def is_running(self, container: Container) -> bool: ...
 ```
+
+`popen` returns the process so the caller decides how to wait on it and what
+to do with its streams; `Runtime.exec` is the capturing wrapper over it.
 
 `start` applies the bind mounts recorded in the container config. Both engines
 bind the host `/etc/resolv.conf` and `/etc/hosts` read-only, because there is
@@ -343,7 +349,9 @@ proot -r <rootfs> -w <workdir> -i <uid>:<gid>
 ```
 
 Environment is passed through the process environment. Writes go straight
-into `rootfs/`, which is the persistent layer. `stop` is a no-op.
+into `rootfs/`, which is the persistent layer. `stop` removes the started
+marker and keeps the copied rootfs, so the container stops reading as
+running while a later `start` costs no second copy.
 
 PRoot lookup order: `XCODON_PROOT` if set, else `proot` on PATH, else the
 vendored `xcodon_runtime/_bin/proot-x86_64`. The PRoot project publishes a
@@ -415,12 +423,13 @@ code of the process.
 rt = Runtime(home: Path | None = None, engine: str | None = None)
 rt.pull(ref: str, platform: str | None = None) -> Image
 rt.inspect(ref: str) -> Image | None
-rt.images() -> list[Image]
+rt.list_images() -> list[Image]
 rt.remove_image(ref: str) -> None
 c = rt.create(ref, command=None, entrypoint=None, binds: list[Bind] = (),
               workdir=None, env: dict[str, str] | None = None,
               user: str | None = None, name: str | None = None) -> Container
 rt.start(c) -> None
+rt.popen(c, command=None, workdir=None, env=None, **popen_kwargs) -> Popen
 rt.exec(c, command: str | Sequence[str], workdir=None, env=None,
         capture: bool = True) -> ExecResult   # code, stdout, stderr
 rt.stop(c) -> None
@@ -484,6 +493,8 @@ v5.4.1 static build. Total under 2 MB.
 - proot engine: slower on syscall-heavy programs, no hostname or pid
   isolation, and container creation costs a full copy on filesystems without
   reflinks.
+- Read-only binds apply to the top mount only. A submount under a bound host
+  path stays writable, because the remount is not recursive.
 - Path length: overlayfs mount options are limited to one page. With a single
   lower directory this is never reached.
 

@@ -140,6 +140,9 @@ class DaemonSource:
             if proc.returncode != 0:
                 err.seek(0)
                 errmsg = err.read().decode(errors='replace').strip()
+                if not errmsg and fetch_error is not None:
+                    # docker said nothing; the reader's own complaint is the news.
+                    raise fetch_error
                 raise PullError(f"docker save {ref.name} failed: {errmsg}")
             if fetch_error is not None:
                 raise fetch_error

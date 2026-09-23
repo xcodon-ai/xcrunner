@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.home import RuntimeHome
 
 
@@ -130,3 +131,10 @@ def test_prune_leftovers_does_not_report_stuck_dirs(home):
     finally:
         # Restore permissions so pytest can clean up
         os.chmod(stuck, 0o700)
+
+
+@pytest.mark.parametrize("bad", ["comma,dir", "colon:dir"])
+def test_home_path_with_option_separators_is_refused(tmp_path, bad):
+    """Overlayfs mount options split on ',' and ':' and cannot quote them."""
+    with pytest.raises(XcodonError, match="overlayfs"):
+        RuntimeHome(tmp_path / bad)
