@@ -166,7 +166,8 @@ class ProotEngine:
                 "proot engine cannot enforce read-only binds; %s is writable",
                 ", ".join(readonly_targets),
             )
-        cmd = [proot, "-r", str(rootfs), "-w", workdir, "-i", f"{container.uid}:{container.gid}"]
+        cmd = [proot, "-r", str(rootfs), "-w", workdir, "-i", f"{container.uid}:{container.gid}",
+               "--kill-on-exit"]
         for host_path in HOST_BINDS:
             if os.path.exists(host_path):
                 cmd += ["-b", host_path]

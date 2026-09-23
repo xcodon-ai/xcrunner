@@ -87,21 +87,29 @@ class ContainerStore:
 
     def create(self, container_id: str, image: Image, image_ref: str, spec: ProcessSpec,
                binds: list[Bind], engine: str, name: str | None) -> Container:
+        """Create a container directory and its config.
+
+        The name-uniqueness check and the directory create (through the
+        config save that makes it visible to ``list()``) happen under the
+        store-wide ``containers`` lock, so two concurrent creates for the
+        same name cannot both succeed.
+        """
         from datetime import datetime, timezone
 
-        if name is not None:
-            for existing in self.list():
-                if existing.name == name:
-                    raise XcodonError(f"container name {name!r} is already in use by {existing.short_id}")
-        cdir = self.home.containers / container_id
-        cdir.mkdir()
-        c = Container(
-            id=container_id, image_id=image.id, image_ref=image_ref, image_rootfs=str(image.rootfs),
-            engine=engine, argv=spec.argv, env=spec.env, workdir=spec.workdir, uid=spec.uid, gid=spec.gid,
-            binds=list(binds), created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            name=name, dir=cdir,
-        )
-        c.save()
+        with self.home.lock("containers"):
+            if name is not None:
+                for existing in self.list():
+                    if existing.name == name:
+                        raise XcodonError(f"container name {name!r} is already in use by {existing.short_id}")
+            cdir = self.home.containers / container_id
+            cdir.mkdir()
+            c = Container(
+                id=container_id, image_id=image.id, image_ref=image_ref, image_rootfs=str(image.rootfs),
+                engine=engine, argv=spec.argv, env=spec.env, workdir=spec.workdir, uid=spec.uid, gid=spec.gid,
+                binds=list(binds), created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                name=name, dir=cdir,
+            )
+            c.save()
         return c
 
     def list(self) -> list[Container]:

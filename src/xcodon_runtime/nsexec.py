@@ -71,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
     if child == 0:
         try:
             sc.set_no_new_privs()
+            # PDEATHSIG is cleared on execve only for setuid binaries;
+            # no-new-privs above makes that moot, so this survives the exec.
+            sc.set_parent_death_signal(signal.SIGKILL)
             os.makedirs(workdir, exist_ok=True)
             os.chdir(workdir)
             exe, code = _resolve(command[0], env.get("PATH", ""))

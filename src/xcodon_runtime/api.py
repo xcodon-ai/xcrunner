@@ -126,8 +126,17 @@ class Runtime:
         try:
             out, err = p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            # Terminate first, then kill: a plain kill() only stops the
+            # nsexec/proot wrapper, and the guest process survives it (nsexec
+            # forwards only catchable signals, and PRoot detaches its tracee
+            # when killed) unless a hard SIGKILL is given a chance to reach it.
+            p.terminate()
+            try:
+                p.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
             p.kill()
-            out, err = p.communicate()
+            p.communicate()
             raise
         return ExecResult(p.returncode, out or b"", err or b"")
 
@@ -177,9 +186,18 @@ class Runtime:
             binds: Sequence[Bind] = (), workdir: str | None = None, env: Mapping[str, str] | None = None,
             user: str | None = None, name: str | None = None, rm: bool = False, pull: str = "missing",
             stdin=None, stdout=None, stderr=None) -> int:
+        """Create, start, and wait for one container, forwarding SIGINT/SIGTERM to it.
+
+        Signal forwarding only works when this is called from the main
+        thread: installing a signal handler off the main thread raises
+        ValueError, and ``run`` treats that as "no forwarding available"
+        instead of failing.
+        """
         c = self.create(ref, command, entrypoint, binds, workdir, env, user, name, pull)
+        started = False
         try:
             self.start(c)
+            started = True
             p = self.popen(c, None, None, None, stdin=stdin, stdout=stdout, stderr=stderr)
             previous = {}
 
@@ -190,7 +208,10 @@ class Runtime:
                     pass
 
             for sig in (signal.SIGINT, signal.SIGTERM):
-                previous[sig] = signal.signal(sig, forward)
+                try:
+                    previous[sig] = signal.signal(sig, forward)
+                except ValueError:
+                    pass  # not the main thread; run without signal forwarding
             try:
                 return p.wait()
             finally:
@@ -198,7 +219,8 @@ class Runtime:
                     signal.signal(sig, handler)
         finally:
             try:
-                self.stop(c)
+                if started:
+                    self.stop(c)
             finally:
                 if rm:
                     self.store.remove(c)

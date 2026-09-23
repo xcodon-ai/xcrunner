@@ -1,13 +1,20 @@
 # tests/test_containers_api.py
 import os
 import subprocess
+import threading
 import time
 
 import pytest
 
 from xcodon_runtime.api import Runtime
 from xcodon_runtime.engine import Bind
-from xcodon_runtime.errors import ContainerNotFound, ContainerNotRunning, ImageNotFound, XcodonError
+from xcodon_runtime.errors import (
+    ContainerNotFound,
+    ContainerNotRunning,
+    EngineUnavailable,
+    ImageNotFound,
+    XcodonError,
+)
 
 
 @pytest.fixture
@@ -126,3 +133,80 @@ def test_remove_tolerates_mode_000_overlay_work_dir(home):
         if work_work.exists():
             os.chmod(work_work, 0o700)
     assert not cdir.exists()
+
+
+def test_exec_timeout_kills_the_guest_process(rt):
+    """A timed-out exec must not leave the guest process running.
+
+    nsexec can only forward catchable signals (not SIGKILL) to the guest, and
+    killing PRoot merely detaches its tracee, so exec's timeout handling must
+    escalate from terminate to a real kill and rely on PDEATHSIG / PRoot's
+    --kill-on-exit to actually take the guest down.
+    """
+    c = rt.create("xcodon-test/busybox")
+    rt.start(c)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            rt.exec(c, ["/bin/sleep", "31.7"], timeout=0.5)
+        deadline = time.monotonic() + 3
+        gone = False
+        while time.monotonic() < deadline:
+            if subprocess.run(["pgrep", "-f", "sleep 31.7"], capture_output=True).returncode != 0:
+                gone = True
+                break
+            time.sleep(0.1)
+        assert gone, "sleep 31.7 is still running after the exec timeout"
+    finally:
+        rt.stop(c)
+
+
+def test_concurrent_create_same_name_only_one_succeeds(rt):
+    outcomes = []
+    lock = threading.Lock()
+
+    def worker():
+        try:
+            rt.create("xcodon-test/busybox", name="same")
+            outcome = "ok"
+        except XcodonError:
+            outcome = "rejected"
+        with lock:
+            outcomes.append(outcome)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(outcomes) == ["ok", "rejected"]
+
+
+def test_run_from_non_main_thread_returns_exit_code(rt):
+    """Signal forwarding needs the main thread; run() must still work without it."""
+    result = {}
+
+    def worker():
+        result["code"] = rt.run("xcodon-test/busybox", command=["/bin/sh", "-c", "exit 7"], rm=True)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert result["code"] == 7
+
+
+def test_run_start_failure_does_not_stop_a_never_started_container(rt, monkeypatch):
+    def fail_start(self, c):
+        raise EngineUnavailable("boom")
+
+    monkeypatch.setattr(Runtime, "start", fail_start)
+
+    with pytest.raises(EngineUnavailable):
+        rt.run("xcodon-test/busybox", name="never-started")
+    c = rt.get_container("never-started")
+    assert c.state == "created"
+    rt.remove(c)
+
+    with pytest.raises(EngineUnavailable):
+        rt.run("xcodon-test/busybox", rm=True)
+    assert rt.containers(all=True) == []

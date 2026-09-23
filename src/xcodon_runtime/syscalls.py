@@ -31,6 +31,7 @@ MS_STRICTATIME = 1 << 24
 
 MNT_DETACH = 2
 PR_SET_NO_NEW_PRIVS = 38
+PR_SET_PDEATHSIG = 1
 
 SYS_PIVOT_ROOT = {"x86_64": 155, "aarch64": 41}
 
@@ -93,6 +94,16 @@ def sethostname(name: str) -> None:
 def set_no_new_privs() -> None:
     if _libc.prctl(ctypes.c_int(PR_SET_NO_NEW_PRIVS), ctypes.c_ulong(1), 0, 0, 0) != 0:
         _fail("prctl(PR_SET_NO_NEW_PRIVS)")
+
+
+def set_parent_death_signal(signum: int) -> None:
+    """Ask the kernel to send ``signum`` to this process when its parent dies.
+
+    Used so a guest process dies with the nsexec wrapper that started it,
+    even though nsexec cannot forward SIGKILL (it is not catchable).
+    """
+    if _libc.prctl(ctypes.c_int(PR_SET_PDEATHSIG), ctypes.c_ulong(signum), 0, 0, 0) != 0:
+        _fail("prctl(PR_SET_PDEATHSIG)")
 
 
 def write_id_maps(uid_inside: int, gid_inside: int, host_uid: int, host_gid: int) -> None:
