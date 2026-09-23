@@ -6,15 +6,33 @@ import io
 import json
 import os
 import shutil
-import stat
 import subprocess
-import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from xcodon_runtime.home import RuntimeHome
+
+_PROBE_HOME: Path | None = None
+
+
+def probe_home() -> Path:
+    """A throwaway runtime home for the probes.
+
+    The probes run at collection time and on fixture setup. Without a home of
+    their own they would create the developer's real ``~/.xcodon/runtime``.
+    """
+    global _PROBE_HOME
+    if _PROBE_HOME is None:
+        _PROBE_HOME = Path(tempfile.mkdtemp(prefix="xcodon-probe-home-"))
+    return _PROBE_HOME
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _PROBE_HOME is not None:
+        shutil.rmtree(_PROBE_HOME, ignore_errors=True)
 
 
 @pytest.fixture
@@ -73,7 +91,7 @@ def pytest_collection_modifyitems(config, items):
             from xcodon_runtime.probe import run_probes
 
             if probes is None:
-                probes = run_probes()
+                probes = run_probes(probe_home())
             if not all(probes[k]["ok"] for k in ("userns", "overlay", "pidns_proc")):
                 item.add_marker(pytest.mark.skip(reason=f"ns engine unavailable: {probes}"))
         if "docker" in item.keywords:
@@ -95,7 +113,7 @@ def pytest_collection_modifyitems(config, items):
 def _ns_available() -> bool:
     from xcodon_runtime.probe import run_probes
 
-    return all(v["ok"] for v in run_probes().values())
+    return all(v["ok"] for v in run_probes(probe_home()).values())
 
 
 def _proot_available() -> bool:

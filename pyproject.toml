@@ -30,8 +30,17 @@ markers = [
   "proot: needs a PRoot binary",
   "docker: needs a local docker daemon",
   "cwltool: needs cwltool installed",
+  "coala_runtime: needs coala-runtime installed",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+# Ruff's documented default rules, pinned so a newer ruff cannot widen the set
+# under CI and fail the build over style this project never chose.
+select = ["E4", "E7", "E9", "F"]
+# The manifest and layer loops read `for l in doc["layers"]`, which the plan's
+# own snippets use; renaming the loop variable everywhere buys nothing.
+ignore = ["E741"]

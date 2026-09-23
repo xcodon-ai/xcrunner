@@ -71,3 +71,13 @@ def test_directory_mode_copied(tmp_path):
     out = tmp_path / "rootfs"
     build_rootfs([a], out)
     assert oct(os.stat(out / "d").st_mode & 0o777) == oct(0o750)
+
+
+def test_file_deleted_in_one_layer_and_re_added_in_the_next(tmp_path):
+    a = mk(tmp_path / "a", {"f": "A"})
+    b = mk(tmp_path / "b", {".wh.f": ""})
+    c = mk(tmp_path / "c", {"f": "C"})
+    out = tmp_path / "rootfs"
+    build_rootfs([a, b, c], out)
+    assert (out / "f").read_text() == "C"
+    assert not (out / ".wh.f").exists()

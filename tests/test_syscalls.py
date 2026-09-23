@@ -1,9 +1,7 @@
-import os
 import platform
 import subprocess
 import sys
 
-import pytest
 
 from xcodon_runtime import syscalls as sc
 

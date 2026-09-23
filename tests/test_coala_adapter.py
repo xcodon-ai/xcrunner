@@ -56,7 +56,7 @@ def test_lifecycle_like_coala_runtime(manager, tmp_path):
 def test_cleanup_all(manager):
     async def flow():
         a = await manager.create_container("xcodon-test/busybox:latest")
-        b = await manager.create_container("xcodon-test/busybox:latest")
+        await manager.create_container("xcodon-test/busybox:latest")
         await manager.start_container(a)
         await manager.cleanup_all()
         assert manager.containers == {}

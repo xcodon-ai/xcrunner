@@ -11,7 +11,6 @@ import hashlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
 
 
 def digest_of(data: bytes) -> str:

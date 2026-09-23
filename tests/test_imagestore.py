@@ -5,14 +5,12 @@ import json
 import tarfile
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
 import xcodon_runtime.imagestore as imagestore
 from xcodon_runtime.errors import ImageNotFound, PullError
 from xcodon_runtime.imagestore import ImageStore
-from xcodon_runtime.reference import Platform
 from xcodon_runtime.registry import FetchedImage, FetchedLayer
 
 

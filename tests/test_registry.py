@@ -1,6 +1,5 @@
 import gzip
 import io
-import json
 import tarfile
 
 import pytest

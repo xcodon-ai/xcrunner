@@ -5,7 +5,6 @@ import os
 import stat
 import tarfile
 import warnings
-from pathlib import Path
 
 import pytest
 
