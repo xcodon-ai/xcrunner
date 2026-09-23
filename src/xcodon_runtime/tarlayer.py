@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import logging
+import os
 import tarfile
 from pathlib import Path
 from typing import BinaryIO
@@ -40,8 +41,32 @@ def open_layer_stream(path: Path) -> BinaryIO:
     return open(path, "rb")
 
 
+def _hardlink_escapes(linkname: str, dest: str) -> bool:
+    """True when a hardlink target would land outside ``dest``.
+
+    The stdlib ``tar`` filter does not look at a hardlink's linkname, so
+    without this check ``tarfile`` would link a host file into the layer and
+    then rewrite that host inode's mode and times.
+    """
+    if os.path.isabs(linkname):
+        return True
+    dest_real = os.path.realpath(dest)
+    target = os.path.realpath(os.path.join(dest_real, linkname))
+    return target != dest_real and not target.startswith(dest_real + os.sep)
+
+
 def _layer_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo | None:
     """The stdlib ``tar`` filter, plus owner read/write so later entries can land inside."""
+    if member.islnk():
+        if _hardlink_escapes(member.linkname, dest):
+            raise tarfile.LinkOutsideDestinationError(member, member.linkname)
+        if not os.path.exists(os.path.join(dest, member.linkname)):
+            # The target is not on disk, so tarfile would scan the rest of the
+            # archive for it. On a stream that reads the whole tar away and
+            # leaves nothing for the members after this one.
+            raise tarfile.FilterError(
+                f"{member.name!r} is a hardlink to {member.linkname!r}, which was not extracted"
+            )
     member = tarfile.tar_filter(member, dest)
     # Clear ownership (tar ownership is ignored; files belong to the invoking user).
     mode = member.mode if member.mode is not None else (0o755 if member.isdir() else 0o644)
@@ -64,7 +89,8 @@ def extract_layer(stream: BinaryIO, dest: Path) -> int:
     Ownership in the tar is ignored: every file belongs to the invoking user.
     Setuid, setgid, sticky, and group/other write bits are dropped by the filter.
     Device nodes, sockets, and fifos are skipped. Entries that would escape
-    ``dest`` are refused by the filter and skipped.
+    ``dest`` are refused by the filter and skipped, including hardlinks whose
+    target lies outside ``dest`` and hardlinks with no target at all.
     """
     if not hasattr(tarfile, "tar_filter"):
         raise XcodonError(
@@ -83,6 +109,10 @@ def extract_layer(stream: BinaryIO, dest: Path) -> int:
             try:
                 tar.extract(member, dest, filter=_layer_filter)
             except tarfile.FilterError as e:
+                log.warning("skip %s: %s", member.name, e)
+                skipped += 1
+            except KeyError as e:
+                # A hardlink whose target is neither on disk nor an earlier member.
                 log.warning("skip %s: %s", member.name, e)
                 skipped += 1
             except (PermissionError, OSError) as e:

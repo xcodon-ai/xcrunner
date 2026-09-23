@@ -143,3 +143,58 @@ def test_layer_filter_clears_ownership(tmp_path):
     data = make_tar([(ti("file", uid=12345, gid=12345), b"content")])
     extract_layer(io.BytesIO(data), tmp_path)
     assert os.lstat(tmp_path / "file").st_uid == os.getuid()
+
+
+def test_hardlink_escaping_dest_is_skipped(tmp_path):
+    """A hardlink whose linkname points outside dest must not link the host file in."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    os.chmod(outside, 0o600)
+    os.utime(outside, (1000000, 1000000))
+    before = os.lstat(outside)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    data = make_tar(
+        [
+            (ti("stolen", tarfile.LNKTYPE, mode=0o777, linkname="../outside.txt"), None),
+            (ti("ok"), b"fine"),
+        ]
+    )
+    skipped = extract_layer(io.BytesIO(data), dest)
+    assert skipped == 1
+    assert not (dest / "stolen").exists()
+    assert (dest / "ok").read_bytes() == b"fine"
+    after = os.lstat(outside)
+    assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+    assert after.st_mtime == before.st_mtime
+    assert outside.read_text() == "secret"
+
+
+def test_hardlink_with_absolute_linkname_is_skipped(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("host file")
+    os.chmod(victim, 0o600)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    data = make_tar([(ti("grab", tarfile.LNKTYPE, mode=0o777, linkname=str(victim)), None)])
+    skipped = extract_layer(io.BytesIO(data), dest)
+    assert skipped == 1
+    assert not (dest / "grab").exists()
+    assert stat.S_IMODE(os.lstat(victim).st_mode) == 0o600
+
+
+def test_dangling_hardlink_is_skipped(tmp_path):
+    """A hardlink whose target was never extracted is skipped, and the rest still lands.
+
+    Left to tarfile, such a member makes it scan the whole archive for the
+    target and raise KeyError, which on a stream eats the members after it.
+    """
+    data = make_tar(
+        [
+            (ti("dangling", tarfile.LNKTYPE, linkname="never-there"), None),
+            (ti("after"), b"still extracted"),
+        ]
+    )
+    skipped = extract_layer(io.BytesIO(data), tmp_path)
+    assert skipped == 1
+    assert (tmp_path / "after").read_bytes() == b"still extracted"
