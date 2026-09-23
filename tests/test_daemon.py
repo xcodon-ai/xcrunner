@@ -130,3 +130,57 @@ def test_daemon_source_uses_fake_docker(home, tmp_path, monkeypatch):
 
 def test_daemon_source_unavailable_when_missing(home):
     assert not DaemonSource(home, docker="/nonexistent/docker").available()
+
+
+def test_daemon_source_has_image_returns_false_when_docker_missing(home):
+    src = DaemonSource(home, docker="/nonexistent/docker")
+    assert not src.has_image(Reference("docker.io", "library/x", "latest"))
+
+
+def test_load_rejects_malformed_json_in_index(home):
+    data, _ = oci_layout_tar()
+    buf = io.BytesIO(data)
+    out = io.BytesIO()
+    with tarfile.open(fileobj=buf) as src, tarfile.open(fileobj=out, mode="w") as dst:
+        for m in src:
+            content = src.extractfile(m).read() if m.isfile() else None
+            if m.name in ("index.json", "./index.json"):
+                content = b"{not json"
+            if content is not None:
+                m.size = len(content)
+                dst.addfile(m, io.BytesIO(content))
+            else:
+                dst.addfile(m)
+    with pytest.raises(PullError, match="malformed JSON"):
+        load_oci_layout_tar(io.BytesIO(out.getvalue()), home, Platform())
+
+
+def test_daemon_source_fetch_handles_large_stderr(home, tmp_path):
+    data, config = oci_layout_tar()
+    tarfile_path = tmp_path / "img.tar"
+    tarfile_path.write_bytes(data)
+    fake = tmp_path / "docker"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        f"  save) head -c 200000 /dev/zero | tr '\\0' x >&2; cat {tarfile_path}; exit 0;;\n"
+        "esac\nexit 2\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    src = DaemonSource(home, docker=str(fake))
+    fetched = src.fetch(Reference("docker.io", "library/test", "latest"), Platform())
+    assert fetched.config == config
+
+
+def test_daemon_source_fetch_reports_stderr_on_error(home, tmp_path):
+    fake = tmp_path / "docker"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  save) echo "boom error message" >&2; exit 3;;\n'
+        "esac\nexit 2\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    src = DaemonSource(home, docker=str(fake))
+    with pytest.raises(PullError, match="boom error message"):
+        src.fetch(Reference("docker.io", "library/test", "latest"), Platform())

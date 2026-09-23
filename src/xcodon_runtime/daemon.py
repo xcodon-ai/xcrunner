@@ -9,7 +9,7 @@ import os
 import shutil
 import subprocess
 import tarfile
-from pathlib import Path
+import tempfile
 from typing import BinaryIO
 
 from xcodon_runtime.errors import PullError
@@ -45,7 +45,10 @@ def _read_json_blob(home: RuntimeHome, digest: str) -> dict:
     path = home.blobs / digest.split(":", 1)[1]
     if not path.exists():
         raise PullError(f"docker save output references missing blob {digest}")
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except ValueError as e:
+        raise PullError(f"docker save output has malformed JSON in blob {digest}") from e
 
 
 def load_oci_layout_tar(stream: BinaryIO, home: RuntimeHome, platform: Platform) -> FetchedImage:
@@ -55,7 +58,11 @@ def load_oci_layout_tar(stream: BinaryIO, home: RuntimeHome, platform: Platform)
         for member in tar:
             if member.name in ("index.json", "./index.json"):
                 f = tar.extractfile(member)
-                index = json.load(f) if f else None
+                if f:
+                    try:
+                        index = json.load(f)
+                    except ValueError as e:
+                        raise PullError("docker save output has malformed JSON in index.json") from e
             elif member.isfile() and "blobs/sha256/" in member.name:
                 _store_blob(tar, member, home)
     if index is None:
@@ -109,18 +116,33 @@ class DaemonSource:
         return r.returncode == 0
 
     def has_image(self, ref: Reference) -> bool:
-        r = subprocess.run([self.docker, "image", "inspect", ref.name], capture_output=True, timeout=30)
+        try:
+            r = subprocess.run([self.docker, "image", "inspect", ref.name], capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
         return r.returncode == 0
 
     def fetch(self, ref: Reference, platform: Platform) -> FetchedImage:
         log.info("exporting %s from the local docker daemon", ref.name)
-        proc = subprocess.Popen([self.docker, "save", ref.name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        assert proc.stdout is not None
+        err = tempfile.TemporaryFile()
         try:
-            fetched = load_oci_layout_tar(proc.stdout, self.home, platform)
+            proc = subprocess.Popen([self.docker, "save", ref.name], stdout=subprocess.PIPE, stderr=err)
+            assert proc.stdout is not None
+            fetch_error: Exception | None = None
+            try:
+                fetched = load_oci_layout_tar(proc.stdout, self.home, platform)
+            except Exception as e:
+                fetch_error = e
+                fetched = None
+            finally:
+                proc.stdout.close()
+                proc.wait()
+            if proc.returncode != 0:
+                err.seek(0)
+                errmsg = err.read().decode(errors='replace').strip()
+                raise PullError(f"docker save {ref.name} failed: {errmsg}")
+            if fetch_error is not None:
+                raise fetch_error
+            return fetched
         finally:
-            proc.stdout.close()
-            _, err = proc.communicate()
-        if proc.returncode != 0:
-            raise PullError(f"docker save {ref.name} failed: {err.decode(errors='replace').strip()}")
-        return fetched
+            err.close()
