@@ -65,11 +65,8 @@ def pytest_collection_modifyitems(config, items):
     probes = None
     for item in items:
         if "ns" in item.keywords:
-            try:
-                from xcodon_runtime.probe import run_probes
-            except ImportError:
-                item.add_marker(pytest.mark.skip(reason="probe module not yet available (Task 9)"))
-                continue
+            from xcodon_runtime.probe import run_probes
+
             if probes is None:
                 probes = run_probes()
             if not all(probes[k]["ok"] for k in ("userns", "overlay", "pidns_proc")):
