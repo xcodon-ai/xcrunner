@@ -133,6 +133,7 @@ __version__ = "0.1.0"
 
 ```
 # .gitignore
+.superpowers/
 __pycache__/
 *.pyc
 .venv/
