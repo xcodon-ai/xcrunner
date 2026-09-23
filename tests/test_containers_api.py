@@ -78,6 +78,12 @@ def test_run_returns_exit_code_and_rm(rt, tmp_path):
     assert rt.containers(all=True) == []
 
 
+def test_run_cidfile_error_cleans_up_when_rm(rt):
+    with pytest.raises(XcodonError, match="cidfile"):
+        rt.run("xcodon-test/busybox", command=["/bin/true"], rm=True, cidfile="/nonexistent/dir/cid")
+    assert rt.containers(all=True) == []
+
+
 def test_run_without_rm_leaves_exited_container(rt):
     code = rt.run("xcodon-test/busybox", command=["/bin/true"], name="kept")
     assert code == 0

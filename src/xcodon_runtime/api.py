@@ -197,14 +197,14 @@ class Runtime:
         after creation, before it starts.
         """
         c = self.create(ref, command, entrypoint, binds, workdir, env, user, name, pull)
-        if cidfile:
-            try:
-                with open(cidfile, "w") as f:
-                    f.write(c.id)
-            except OSError as e:
-                raise XcodonError(f"cannot write cidfile {cidfile}: {e}") from e
         started = False
         try:
+            if cidfile:
+                try:
+                    with open(cidfile, "w") as f:
+                        f.write(c.id)
+                except OSError as e:
+                    raise XcodonError(f"cannot write cidfile {cidfile}: {e}") from e
             self.start(c)
             started = True
             p = self.popen(c, None, None, None, stdin=stdin, stdout=stdout, stderr=stderr)
