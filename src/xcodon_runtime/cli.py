@@ -15,6 +15,7 @@ from xcodon_runtime import __version__
 from xcodon_runtime.api import Runtime
 from xcodon_runtime.engine import Bind
 from xcodon_runtime.errors import XcodonError
+from xcodon_runtime.keeper import KEEPER_LOG
 from xcodon_runtime.reference import parse_platform
 
 log = logging.getLogger("xcodon")
@@ -29,7 +30,7 @@ class UsageError(XcodonError):
 # Flags docker or cwltool may pass that we accept and ignore. True = takes a value.
 IGNORED_FLAGS = {
     "--memory": True, "-m": True, "--memory-swap": True, "--cpus": True, "--cpu-shares": True,
-    "--gpus": True, "--net": True, "--network": True, "--read-only": True, "--log-driver": True,
+    "--gpus": True, "--net": True, "--network": True, "--read-only": False, "--log-driver": True,
     "--userns": True, "--security-opt": True, "-t": False, "--tty": False, "--init": False,
     "--detach-keys": True, "--platform": True,
 }
@@ -57,6 +58,13 @@ class RunOptions:
     ignored: list[str] = field(default_factory=list)
 
 
+def _mount_flag(kv: dict[str, str], key: str) -> bool:
+    """A --mount flag is on when it is bare or set to true. `readonly=false` is off."""
+    if key not in kv:
+        return False
+    return kv[key] == "" or kv[key].lower() == "true"
+
+
 def _parse_mount(value: str) -> Bind:
     fields = next(csv.reader(StringIO(value)))
     kv: dict[str, str] = {}
@@ -69,7 +77,7 @@ def _parse_mount(value: str) -> Bind:
     dst = kv.get("target") or kv.get("destination") or kv.get("dst")
     if not src or not dst:
         raise UsageError(f"--mount needs source and target: {value}")
-    readonly = "readonly" in kv or "ro" in kv or kv.get("readonly") == "true"
+    readonly = _mount_flag(kv, "readonly") or _mount_flag(kv, "ro")
     return Bind(os.path.abspath(src), dst, readonly)
 
 
@@ -269,7 +277,10 @@ def cmd_ps(rt: Runtime, args) -> int:
 
 def cmd_logs(rt: Runtime, args) -> int:
     c = rt.get_container(args.container)
-    path = c.dir / "keeper.log"
+    if c.engine == "proot":
+        print("no keeper log: proot engine", file=sys.stderr)
+        return 0
+    path = c.dir / KEEPER_LOG
     if path.exists():
         sys.stdout.write(path.read_text(errors="replace"))
     return 0

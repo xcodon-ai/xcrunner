@@ -174,3 +174,11 @@ def test_copy_rootfs_failure_raises_engine_unavailable_and_cleans_up(home, busyb
     with pytest.raises(EngineUnavailable):
         e.start(c)
     assert not (c.dir / "rootfs").exists()
+
+
+def test_find_proot_ignores_a_directory(monkeypatch, tmp_path):
+    """An XCODON_PROOT that points at a directory is not a usable binary."""
+    d = tmp_path / "somewhere"
+    d.mkdir()
+    monkeypatch.setenv("XCODON_PROOT", str(d))
+    assert find_proot() is None

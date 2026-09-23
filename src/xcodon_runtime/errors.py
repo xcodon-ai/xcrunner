@@ -9,6 +9,10 @@ class ImageNotFound(XcodonError):
     """The image is not in the local store."""
 
 
+class InvalidReference(XcodonError, ValueError):
+    """An image reference or platform string cannot be parsed."""
+
+
 class PullError(XcodonError):
     """Fetching an image failed: HTTP error, auth, digest mismatch, no platform match."""
 

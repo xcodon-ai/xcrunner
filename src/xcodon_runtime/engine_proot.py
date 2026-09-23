@@ -26,7 +26,7 @@ def find_proot() -> str | None:
     """Find a PRoot binary: XCODON_PROOT, then proot on PATH, then the vendored build."""
     env = os.environ.get("XCODON_PROOT")
     if env:
-        return env if os.access(env, os.X_OK) else None
+        return env if os.path.isfile(env) and os.access(env, os.X_OK) else None
     on_path = shutil.which("proot")
     if on_path:
         return on_path

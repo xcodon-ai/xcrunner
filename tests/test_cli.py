@@ -161,3 +161,46 @@ def test_xcodon_runtime_alias_console_script():
     r = subprocess.run([exe, "--version"], capture_output=True, text=True)
     assert r.returncode == 0
     assert __version__ in r.stdout
+
+
+def test_bare_read_only_does_not_swallow_the_image():
+    """docker's --read-only is boolean; taking a value here ate the image name."""
+    opts = cli.parse_run_args(["--read-only", "busybox", "echo", "hi"])
+    assert opts.image == "busybox"
+    assert opts.command == ["echo", "hi"]
+    assert "--read-only" in opts.ignored
+
+
+def test_mount_readonly_false_is_writable():
+    assert cli.parse_run_args(["--mount=type=bind,source=/h,target=/t,readonly=false", "img"]).binds == [
+        Bind("/h", "/t", False)
+    ]
+    assert cli.parse_run_args(["--mount=type=bind,source=/h,target=/t,ro=false", "img"]).binds == [
+        Bind("/h", "/t", False)
+    ]
+    assert cli.parse_run_args(["--mount=type=bind,source=/h,target=/t,ro=true", "img"]).binds == [
+        Bind("/h", "/t", True)
+    ]
+    assert cli.parse_run_args(["--mount=type=bind,source=/h,target=/t,readonly", "img"]).binds == [
+        Bind("/h", "/t", True)
+    ]
+
+
+def test_bad_reference_exits_125_without_a_traceback(home, capsys):
+    """cwltool passes user-typed dockerPull strings; a bare ValueError escaped main()."""
+    assert cli.main(["pull", "BAD REF!!"]) == 125
+    assert "xcodon:" in capsys.readouterr().err
+
+
+def test_bad_platform_exits_125(home, capsys):
+    assert cli.main(["pull", "--platform", "junk", "busybox"]) == 125
+    assert "xcodon:" in capsys.readouterr().err
+
+
+def test_logs_on_a_proot_container_explains_there_is_none(home, busybox_image, capfd):
+    assert cli.main(["--engine", "proot", "create", "--name", "plog", "xcodon-test/busybox"]) == 0
+    capfd.readouterr()
+    assert cli.main(["--engine", "proot", "logs", "plog"]) == 0
+    out, err = capfd.readouterr()
+    assert out == ""
+    assert "no keeper log: proot engine" in err

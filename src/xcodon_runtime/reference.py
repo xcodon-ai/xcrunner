@@ -6,6 +6,8 @@ import platform as _platform
 import re
 from dataclasses import dataclass
 
+from xcodon_runtime.errors import InvalidReference
+
 DEFAULT_REGISTRY = "docker.io"
 DOCKER_HUB_API = "registry-1.docker.io"
 
@@ -49,20 +51,20 @@ def parse_reference(text: str) -> Reference:
     if text.startswith("docker://"):
         text = text[len("docker://") :]
     if not text:
-        raise ValueError("empty image reference")
+        raise InvalidReference("empty image reference")
 
     digest = None
     if "@" in text:
         text, digest = text.split("@", 1)
         if not _DIGEST_RE.match(digest):
-            raise ValueError(f"invalid digest {digest!r}")
+            raise InvalidReference(f"invalid digest {digest!r}")
 
     first, _, rest = text.partition("/")
     looks_like_host = "." in first or ":" in first or first == "localhost"
     if looks_like_host and rest:
         registry, path = first, rest
         if not _REGISTRY_RE.match(registry):
-            raise ValueError(f"invalid registry {registry!r}")
+            raise InvalidReference(f"invalid registry {registry!r}")
     else:
         registry, path = DEFAULT_REGISTRY, text
 
@@ -71,12 +73,12 @@ def parse_reference(text: str) -> Reference:
     if ":" in last:
         path, tag = path.rsplit(":", 1)
         if not _TAG_RE.match(tag):
-            raise ValueError(f"invalid tag {tag!r}")
+            raise InvalidReference(f"invalid tag {tag!r}")
 
     if registry == DEFAULT_REGISTRY and "/" not in path:
         path = f"library/{path}"
     if not _REPOSITORY_RE.match(path):
-        raise ValueError(f"invalid repository name {path!r}")
+        raise InvalidReference(f"invalid repository name {path!r}")
     if tag is None and digest is None:
         tag = "latest"
     return Reference(registry, path, tag, digest)
@@ -104,5 +106,5 @@ def host_platform() -> Platform:
 def parse_platform(text: str) -> Platform:
     parts = text.split("/")
     if len(parts) < 2 or len(parts) > 3:
-        raise ValueError(f"platform must be os/arch[/variant], got {text!r}")
+        raise InvalidReference(f"platform must be os/arch[/variant], got {text!r}")
     return Platform(parts[0], parts[1], parts[2] if len(parts) == 3 else None)
