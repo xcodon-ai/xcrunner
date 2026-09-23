@@ -4,16 +4,18 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from xcodon_runtime import engine_ns, keeper
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import Bind
 from xcodon_runtime.engine_ns import KEEPER_PID, NsEngine
-from xcodon_runtime.errors import ContainerNotRunning
+from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
 
 pytestmark = pytest.mark.ns
 
@@ -187,3 +189,112 @@ def test_stop_leaves_a_removable_container_directory(home, busybox_rootfs, engin
     engine.stop(c)
     shutil.rmtree(c.dir)
     assert not c.dir.exists()
+
+
+def test_image_symlinks_cannot_aim_a_mount_at_the_host(home, busybox_rootfs, engine, tmp_path):
+    """An image whose /etc is a symlink must not make the keeper touch the host."""
+    host_dir = tmp_path / "host-etc"
+    host_dir.mkdir()
+    shutil.rmtree(busybox_rootfs / "etc")
+    (busybox_rootfs / "etc").symlink_to(host_dir)
+    c = make_container(home, busybox_rootfs)
+    engine.start(c)
+    try:
+        r = sh(engine, c, "cat /etc/hosts")
+        assert r.returncode == 0, r.stderr
+        assert "127.0.0.1" in r.stdout
+    finally:
+        engine.stop(c)
+    assert list(host_dir.iterdir()) == [], "the keeper wrote to the host through the symlink"
+    assert list((c.dir / "upper").rglob("hosts")), "the mountpoint must be made inside the overlay"
+
+
+def test_mount_targets_in_the_old_root_are_refused():
+    """The old root is the host file system, so no mount may resolve into it.
+
+    The keeper picks a random old-root name per start, so this is checked at the
+    unit level: an image cannot guess the name to aim a bind at it.
+    """
+    old = "xcodon-oldroot-forthistest"
+    assert keeper._in_root("/data", old) == "/data"
+    with pytest.raises(ValueError):
+        keeper._in_root(f"/{old}", old)
+    with pytest.raises(ValueError):
+        keeper._in_root(f"/{old}/escape", old)
+    with pytest.raises(ValueError):
+        keeper._in_root(f"/data/../{old}/escape", old)
+
+
+def test_zombie_keeper_does_not_read_as_running(home, busybox_rootfs, engine):
+    c = make_container(home, busybox_rootfs)
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - the child never returns to pytest
+        time.sleep(0.5)
+        os._exit(0)
+    try:
+        starttime = engine_ns.process_start_time(pid)
+        assert starttime is not None
+        (c.dir / KEEPER_PID).write_text(json.dumps({"pid": pid, "starttime": starttime}))
+        assert engine.is_running(c)
+        deadline = time.monotonic() + 10
+        while engine_ns.process_start_time(pid) is not None:
+            assert time.monotonic() < deadline, "the child never became a zombie"
+            time.sleep(0.02)
+        assert Path(f"/proc/{pid}").exists(), "the test needs a zombie, not a reaped child"
+        assert not engine.is_running(c)
+        engine.stop(c)
+        assert not (c.dir / KEEPER_PID).exists()
+    finally:
+        os.waitpid(pid, 0)
+
+
+def test_start_kills_a_stalled_keeper_and_raises(home, busybox_rootfs, engine, monkeypatch):
+    marker = "xcodon-stalled-keeper-marker"
+    monkeypatch.setattr(engine_ns, "START_TIMEOUT", 0.5)
+    monkeypatch.setattr(engine_ns, "KEEPER_ARGV",
+                        [sys.executable, "-c", f"import time; time.sleep(30)  # {marker}"])
+    c = make_container(home, busybox_rootfs)
+    began = time.monotonic()
+    with pytest.raises(EngineUnavailable):
+        engine.start(c)
+    assert time.monotonic() - began < 10, "start must not block on the stalled keeper"
+    assert not engine.is_running(c)
+    left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True).stdout.strip()
+    assert left == "", f"the stalled keeper survived: {left}"
+
+
+def test_start_failure_reports_the_keeper_log(home, tmp_path, engine):
+    c = make_container(home, tmp_path / "no-such-rootfs")
+    with pytest.raises(EngineUnavailable) as e:
+        engine.start(c)
+    assert "Keeper log:" in str(e.value)
+    assert "Traceback" in str(e.value)
+    assert not engine.is_running(c)
+
+
+def test_non_executable_command_is_126(home, busybox_rootfs, engine):
+    target = busybox_rootfs / "notexec"
+    target.write_text("#!/bin/sh\necho nope\n")
+    target.chmod(0o644)
+    c = make_container(home, busybox_rootfs)
+    engine.start(c)
+    try:
+        p = engine.popen(c, ["/notexec"], c.env, "/", stderr=subprocess.PIPE)
+        _, err = p.communicate(timeout=30)
+        assert p.returncode == 126
+        assert b"permission denied" in err
+    finally:
+        engine.stop(c)
+
+
+def test_exec_into_a_foreign_process_is_125(home, busybox_rootfs, engine):
+    """The pid file passes liveness, but the process is not a keeper we can enter."""
+    c = make_container(home, busybox_rootfs)
+    mine = os.getpid()
+    (c.dir / KEEPER_PID).write_text(
+        json.dumps({"pid": mine, "starttime": engine_ns.process_start_time(mine)})
+    )
+    assert engine.is_running(c)
+    p = engine.popen(c, ["/bin/true"], c.env, "/", stderr=subprocess.PIPE)
+    _, err = p.communicate(timeout=30)
+    assert p.returncode == 125, err
