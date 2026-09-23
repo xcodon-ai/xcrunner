@@ -216,3 +216,24 @@ def test_run_start_failure_does_not_stop_a_never_started_container(rt, monkeypat
     with pytest.raises(EngineUnavailable):
         rt.run("xcodon-test/busybox", rm=True)
     assert rt.containers(all=True) == []
+
+
+def test_stopped_container_is_not_running_and_restarts(rt):
+    """A stopped container must not be listed, must refuse exec, and must restart.
+
+    The proot engine has no keeper process, so "running" is the started
+    marker; before, stop() left it in place and the container stayed
+    "running" forever.
+    """
+    c = rt.create("xcodon-test/busybox", name="cycle")
+    rt.start(c)
+    assert rt.exec(c, "echo kept > /state").code == 0
+    rt.stop(c)
+    assert rt.containers() == []
+    assert [x.id for x in rt.containers(all=True)] == [c.id]
+    with pytest.raises(ContainerNotRunning):
+        rt.exec(c, "true")
+    rt.start(c)
+    assert rt.exec(c, ["/bin/cat", "/state"]).stdout == b"kept\n"
+    rt.stop(c)
+    rt.remove(c)

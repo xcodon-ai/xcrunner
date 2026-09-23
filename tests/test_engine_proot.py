@@ -182,3 +182,17 @@ def test_find_proot_ignores_a_directory(monkeypatch, tmp_path):
     d.mkdir()
     monkeypatch.setenv("XCODON_PROOT", str(d))
     assert find_proot() is None
+
+
+def test_start_after_marker_loss_does_not_copy_again(home, busybox_rootfs):
+    """The marker is written on every start, and an existing rootfs is kept."""
+    e = ProotEngine()
+    c = make_container(home, busybox_rootfs)
+    e.start(c)
+    copied = c.dir / "rootfs" / "bin" / "busybox"
+    before = os.stat(copied).st_mtime_ns
+    (c.dir / STARTED_MARKER).unlink()
+    assert not e.is_running(c)
+    e.start(c)
+    assert e.is_running(c)
+    assert os.stat(copied).st_mtime_ns == before, "the rootfs must not be copied a second time"

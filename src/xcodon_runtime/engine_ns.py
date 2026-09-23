@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from xcodon_runtime.containers import Container
+from xcodon_runtime.engine import container_lock
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
 from xcodon_runtime.keeper import KEEPER_LOG, KEEPER_PLAN
 
@@ -64,6 +65,11 @@ class NsEngine:
         }
 
     def start(self, container: Container) -> None:
+        """Spawn the keeper, under the container lock so two starts cannot race."""
+        with container_lock(container):
+            self._start_locked(container)
+
+    def _start_locked(self, container: Container) -> None:
         if self.is_running(container):
             return
         for d in ("upper", "work", "merged"):
@@ -164,6 +170,10 @@ class NsEngine:
             pass
 
     def stop(self, container: Container) -> None:
+        with container_lock(container):
+            self._stop_locked(container)
+
+    def _stop_locked(self, container: Container) -> None:
         pid = self._keeper_pid(container)
         if pid is not None:
             _kill(pid, signal.SIGTERM)

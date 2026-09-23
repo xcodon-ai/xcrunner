@@ -46,6 +46,17 @@ class Engine(Protocol):
     def is_running(self, container: "Container") -> bool: ...
 
 
+def container_lock(container: "Container"):
+    """The lock both engines hold across start and stop of one container.
+
+    An engine is given no runtime home, so the home is derived from the
+    container directory, which is always ``<home>/containers/<id>``. Without
+    this lock two concurrent starts both see "not running" and each spawns a
+    keeper; the first one is then leaked.
+    """
+    return RuntimeHome(container.dir.parent.parent).lock(f"container-{container.id}")
+
+
 @dataclass
 class EngineChoice:
     name: str

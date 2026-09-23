@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -298,3 +299,36 @@ def test_exec_into_a_foreign_process_is_125(home, busybox_rootfs, engine):
     p = engine.popen(c, ["/bin/true"], c.env, "/", stderr=subprocess.PIPE)
     _, err = p.communicate(timeout=30)
     assert p.returncode == 125, err
+
+
+def keeper_processes(c) -> list[str]:
+    """Every live keeper process started from this container's mount plan."""
+    plan = str(c.dir / keeper.KEEPER_PLAN)
+    out = subprocess.run(["pgrep", "-af", plan], capture_output=True, text=True).stdout
+    return [line for line in out.splitlines() if "xcodon_runtime.keeper" in line]
+
+
+def test_two_concurrent_starts_leave_one_keeper(home, busybox_rootfs, engine):
+    """Without the container lock both starts see "not running" and the first keeper leaks."""
+    c = make_container(home, busybox_rootfs)
+    failures = []
+
+    def worker():
+        try:
+            engine.start(c)
+        except BaseException as e:  # noqa: BLE001 - reported below
+            failures.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        assert not failures, failures
+        assert engine.is_running(c)
+        alive = keeper_processes(c)
+        assert len(alive) == 1, alive
+    finally:
+        engine.stop(c)
+    assert keeper_processes(c) == []

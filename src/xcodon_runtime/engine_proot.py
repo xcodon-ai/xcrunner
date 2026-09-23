@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from xcodon_runtime.containers import Container
-from xcodon_runtime.engine import Bind
+from xcodon_runtime.engine import Bind, container_lock
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
 
 log = logging.getLogger(__name__)
@@ -119,21 +119,29 @@ class ProotEngine:
     name = "proot"
 
     def start(self, container: Container) -> None:
-        proot = find_proot()
-        if proot is None:
-            raise EngineUnavailable(
-                "no PRoot binary: set XCODON_PROOT to a static proot, put proot on PATH, "
-                "or use an x86_64 build with the vendored binary"
-            )
-        rootfs = container.dir / "rootfs"
-        if not rootfs.is_dir() or not any(rootfs.iterdir()):
-            log.info(
-                "container %s: copying rootfs (full copy unless the filesystem supports reflinks)",
-                container.short_id,
-            )
-            _copy_rootfs(Path(container.image_rootfs), rootfs)
+        """Copy the rootfs once, then mark the container started.
+
+        Runs under the container lock so two starts cannot copy at once. The
+        marker is written on every successful start, not only after a copy:
+        a crash between the copy and the marker used to leave the container
+        unstartable, and ``stop`` removes the marker while keeping the rootfs.
+        """
+        with container_lock(container):
+            proot = find_proot()
+            if proot is None:
+                raise EngineUnavailable(
+                    "no PRoot binary: set XCODON_PROOT to a static proot, put proot on PATH, "
+                    "or use an x86_64 build with the vendored binary"
+                )
+            rootfs = container.dir / "rootfs"
+            if not rootfs.is_dir() or not any(rootfs.iterdir()):
+                log.info(
+                    "container %s: copying rootfs (full copy unless the filesystem supports reflinks)",
+                    container.short_id,
+                )
+                _copy_rootfs(Path(container.image_rootfs), rootfs)
             (container.dir / STARTED_MARKER).write_text(proot)
-        (rootfs / container.workdir.lstrip("/")).mkdir(parents=True, exist_ok=True)
+            (rootfs / container.workdir.lstrip("/")).mkdir(parents=True, exist_ok=True)
 
     def is_running(self, container: Container) -> bool:
         rootfs = container.dir / "rootfs"
@@ -178,4 +186,6 @@ class ProotEngine:
         return subprocess.Popen(cmd, env=env, **popen_kwargs)
 
     def stop(self, container: Container) -> None:
-        return None
+        """Remove the started marker. The copied rootfs stays, so a restart is free."""
+        with container_lock(container):
+            (container.dir / STARTED_MARKER).unlink(missing_ok=True)

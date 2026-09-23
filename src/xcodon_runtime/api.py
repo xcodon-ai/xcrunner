@@ -109,7 +109,10 @@ class Runtime:
     def popen(self, c: Container, command: str | Sequence[str] | None = None, workdir: str | None = None,
               env: Mapping[str, str] | None = None, **popen_kwargs) -> subprocess.Popen:
         engine = self._engine(c)
-        if not engine.is_running(c):
+        # The tracked state comes first, as in remove(): a proot container
+        # that has been stopped keeps its rootfs, so the engine alone cannot
+        # tell "started" from "stopped".
+        if c.state != "running" or not engine.is_running(c):
             if c.state == "running":
                 c.state = "exited"
                 c.save()
@@ -165,7 +168,7 @@ class Runtime:
     def containers(self, all: bool = False) -> list[Container]:
         out = []
         for c in self.store.list():
-            running = self._engine(c).is_running(c)
+            running = c.state == "running" and self._engine(c).is_running(c)
             if c.state == "running" and not running:
                 c.state = "exited"
                 c.save()
