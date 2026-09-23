@@ -3,6 +3,7 @@ import os
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -237,3 +238,21 @@ def test_stopped_container_is_not_running_and_restarts(rt):
     assert rt.exec(c, ["/bin/cat", "/state"]).stdout == b"kept\n"
     rt.stop(c)
     rt.remove(c)
+
+
+def test_prune_all_removes_only_old_exited_containers(rt):
+    """Default prune keeps containers; --all drops the ones that exited over a day ago."""
+    old = rt.create("xcodon-test/busybox", name="stale")
+    fresh = rt.create("xcodon-test/busybox", name="recent")
+    for c, days in ((old, 2), (fresh, 0)):
+        c.state = "exited"
+        c.created = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        c.save()
+
+    rt.prune()
+    assert sorted(c.name for c in rt.containers(all=True)) == ["recent", "stale"]
+
+    removed = rt.prune(all=True)
+    assert old.dir in removed
+    assert [c.name for c in rt.containers(all=True)] == ["recent"]
+    rt.remove(fresh)

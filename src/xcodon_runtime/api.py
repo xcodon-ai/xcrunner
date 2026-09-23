@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -23,6 +24,9 @@ from xcodon_runtime.reference import Platform
 from xcodon_runtime.spec import build_spec
 
 log = logging.getLogger(__name__)
+
+# How long an exited container survives `prune --all`.
+CONTAINER_MAX_AGE = timedelta(days=1)
 
 
 @dataclass
@@ -239,8 +243,35 @@ class Runtime:
 
     # -- misc --------------------------------------------------------------------
 
-    def prune(self) -> list[Path]:
-        return self.images.prune()
+    def prune(self, all: bool = False) -> list[Path]:
+        """Remove leftovers. With ``all``, unreferenced layers and old containers too.
+
+        The container sweep lives here because the Runtime owns the
+        ContainerStore: it removes exited containers created more than
+        ``CONTAINER_MAX_AGE`` ago.
+        """
+        removed = self.images.prune(all)
+        if all:
+            removed += self._prune_old_containers()
+        return removed
+
+    def _prune_old_containers(self) -> list[Path]:
+        cutoff = datetime.now(timezone.utc) - CONTAINER_MAX_AGE
+        removed: list[Path] = []
+        for c in self.containers(all=True):
+            if c.state != "exited":
+                continue
+            try:
+                created = datetime.fromisoformat(c.created)
+            except ValueError:
+                log.warning("container %s has an unreadable created time; keeping it", c.short_id)
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if created < cutoff:
+                self.store.remove(c)
+                removed.append(c.dir)
+        return removed
 
     def info(self) -> dict:
         choice = self.engine_choice()

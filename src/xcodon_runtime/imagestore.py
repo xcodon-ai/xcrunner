@@ -78,7 +78,10 @@ class ImageStore:
         reference = parse_reference(ref)
         platform = platform or host_platform()
         lock_name = "pull-" + hashlib.sha256(reference.name.encode()).hexdigest()[:16]
-        with self.home.lock(lock_name):
+        # ``store`` shared is held for the whole pull, fetch included, so a
+        # concurrent prune (which takes it exclusive) cannot delete a blob
+        # that is still downloading. Lock order: pull -> store -> layer/image/refs.
+        with self.home.lock(lock_name), self.home.lock("store", shared=True):
             errors: list[str] = []
             for source in self.sources:
                 if isinstance(source, DaemonSource):
@@ -198,23 +201,32 @@ class ImageStore:
             }
         ]
 
-    def prune(self) -> list[Path]:
-        """Remove leftovers and layers no stored image references.
+    def prune(self, all: bool = False) -> list[Path]:
+        """Remove leftovers and orphan blobs. With ``all``, unreferenced layers too.
 
         Holds ``store`` exclusive (a writer), so it waits out any pull that
-        is still extracting a layer or building an image (those hold
-        ``store`` shared), and no such pull can start once pruning has begun.
-        Lock order: pull -> store -> layer/image/refs.
+        is still fetching, extracting a layer, or building an image (a pull
+        holds ``store`` shared from start to finish), and no such pull can
+        start once pruning has begun. Lock order: pull -> store -> layer/image/refs.
+
+        Because no pull can be in flight here, every blob that is not a
+        half-written ``*.part`` is left over from a pull that died after its
+        download and before its import, so all of them are removed.
         """
         with self.home.lock("store"):
             removed = self.home.prune_leftovers()
-            used: set[str] = set()
-            for img in self.images():
-                manifest = json.loads((img.dir / "manifest.json").read_text())
-                used.update(d.split(":", 1)[1] for d in manifest.get("diff_ids", []))
-            for layer_dir in self.home.layers.iterdir():
-                if layer_dir.name not in used:
-                    with self.home.lock(f"layer-{layer_dir.name}"):
-                        shutil.rmtree(layer_dir, ignore_errors=True)
-                    removed.append(layer_dir)
+            for blob in self.home.blobs.iterdir():
+                if blob.is_file():
+                    blob.unlink(missing_ok=True)
+                    removed.append(blob)
+            if all:
+                used: set[str] = set()
+                for img in self.images():
+                    manifest = json.loads((img.dir / "manifest.json").read_text())
+                    used.update(d.split(":", 1)[1] for d in manifest.get("diff_ids", []))
+                for layer_dir in self.home.layers.iterdir():
+                    if layer_dir.name not in used:
+                        with self.home.lock(f"layer-{layer_dir.name}"):
+                            shutil.rmtree(layer_dir, ignore_errors=True)
+                        removed.append(layer_dir)
             return removed

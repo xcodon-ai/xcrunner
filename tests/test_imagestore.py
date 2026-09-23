@@ -115,7 +115,9 @@ def test_remove_and_prune(store):
     assert st.get("example/app:v1") is None
     assert not img.dir.exists()
     assert len(list(st.home.layers.iterdir())) == 2
-    pruned = st.prune()
+    assert st.prune() == [], "the default prune keeps layers"
+    assert len(list(st.home.layers.iterdir())) == 2
+    pruned = st.prune(all=True)
     assert len(pruned) == 2
     assert not list(st.home.layers.iterdir())
 
@@ -191,3 +193,44 @@ def test_prune_waits_for_in_progress_import(store):
 
     t.join()
     assert "pruned" in result
+
+
+def test_prune_removes_stray_blobs(store):
+    st, _ = store
+    stray = st.home.blobs / ("a" * 64)
+    stray.write_bytes(b"left over from an aborted pull")
+    part = st.home.blobs / ("b" * 64 + ".part")
+    part.write_bytes(b"half a download")
+    removed = st.prune()
+    assert set(removed) == {stray, part}
+    assert not list(st.home.blobs.iterdir())
+
+
+def test_prune_blocks_for_the_whole_pull_not_just_the_import(home):
+    """A pull holds the store lock shared from fetch to import, so prune waits it out."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowSource(FakeSource):
+        def fetch(self, ref, platform):
+            fetched = super().fetch(ref, platform)
+            started.set()
+            assert release.wait(30)
+            return fetched
+
+    st = ImageStore(home, sources=[SlowSource(home, [{"a": b"A"}])])
+    result: dict = {}
+    puller = threading.Thread(target=lambda: result.update(image=st.pull("example/slow:v1")))
+    puller.start()
+    assert started.wait(30)
+    pruner = threading.Thread(target=lambda: result.update(pruned=st.prune()))
+    pruner.start()
+    time.sleep(0.2)
+    try:
+        assert pruner.is_alive(), "prune must wait for the fetch, not only for the import"
+    finally:
+        release.set()
+        puller.join(30)
+        pruner.join(30)
+    assert st.get("example/slow:v1") is not None
+    assert (result["image"].rootfs / "a").read_bytes() == b"A"

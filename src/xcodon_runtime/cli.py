@@ -292,7 +292,7 @@ def cmd_info(rt: Runtime, args) -> int:
 
 
 def cmd_prune(rt: Runtime, args) -> int:
-    for p in rt.prune():
+    for p in rt.prune(all=args.all):
         print(f"removed {p}")
     return 0
 
@@ -359,7 +359,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_logs)
 
     sub.add_parser("info", help="engine choice, probe results, paths").set_defaults(func=cmd_info)
-    sub.add_parser("prune", help="remove leftovers and unreferenced layers").set_defaults(func=cmd_prune)
+    s = sub.add_parser("prune", help="remove leftovers; -a also removes unused layers and old containers")
+    s.add_argument("-a", "--all", action="store_true",
+                   help="also remove unreferenced layers and exited containers older than a day")
+    s.set_defaults(func=cmd_prune)
     return p
 
 
