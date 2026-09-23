@@ -123,6 +123,7 @@ def test_open_layer_stream_gzip_no_resource_leak(tmp_path):
         warnings.simplefilter("always")
         s = open_layer_stream(gz_path)
         s.close()
+        del s
         gc.collect()
         resource_warnings = [x for x in w if issubclass(x.category, ResourceWarning)]
         assert len(resource_warnings) == 0, f"ResourceWarning: {resource_warnings}"
