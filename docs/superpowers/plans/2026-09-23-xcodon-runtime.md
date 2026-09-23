@@ -4567,6 +4567,19 @@ def test_parse_run_args_docker_style():
     assert {"--memory", "--net", "--read-only", "--log-driver", "--cpus", "--gpus"} <= set(opts.ignored)
 
 
+def test_split_argv_keeps_command_flags_out_of_argparse():
+    head, rest = cli._split_argv(["--engine", "proot", "-v", "run", "--rm", "img", "grep", "-v", "x"])
+    assert head == ["--engine", "proot", "-v", "run"]
+    assert rest == ["--rm", "img", "grep", "-v", "x"]
+    assert cli._split_argv(["ps", "-a"]) == (["ps", "-a"], None)
+    assert cli._split_argv(["create", "img"]) == (["create"], ["img"])
+
+
+def test_run_help_exits_zero(home, capsys):
+    assert cli.main(["run", "--help"]) == 0
+    assert "IMAGE [COMMAND...]" in capsys.readouterr().out
+
+
 def test_parse_run_args_unknown_flag_is_error():
     with pytest.raises(cli.UsageError, match="--privileged"):
         cli.parse_run_args(["--privileged", "img"])
@@ -4784,6 +4797,30 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
     raise UsageError("no image given: usage: xcodon run [OPTIONS] IMAGE [COMMAND...]")
 
 
+RUN_USAGE = ("xcodon {cmd} [--mount=... | -v HOST:CONTAINER[:ro]] [-w DIR] [-e K=V] [--entrypoint E] "
+             "[-u USER] [--name N] [--rm] [-i] [--cidfile F] [--pull missing|always|never] IMAGE [COMMAND...]")
+
+_GLOBAL_OPTIONS_WITH_VALUE = {"--engine", "--home"}
+
+
+def _split_argv(argv: list[str]) -> tuple[list[str], list[str] | None]:
+    """Split at a `run` or `create` subcommand. argparse's REMAINDER rejects leading options,
+    and a global `-v` must not swallow a `-v` inside the container command."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _GLOBAL_OPTIONS_WITH_VALUE:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        if tok in ("run", "create"):
+            return argv[: i + 1], argv[i + 1 :]
+        return argv, None
+    return argv, None
+
+
 def _warn_ignored(opts: RunOptions) -> None:
     if opts.ignored:
         log.warning("ignoring unsupported docker options: %s", ", ".join(sorted(set(opts.ignored))))
@@ -4820,6 +4857,9 @@ def cmd_rmi(rt: Runtime, args) -> int:
 
 
 def cmd_run(rt: Runtime, args) -> int:
+    if args.rest[:1] in (["-h"], ["--help"]):
+        print(RUN_USAGE.format(cmd="run"))
+        return 0
     opts = parse_run_args(args.rest)
     _warn_ignored(opts)
     c = rt.create(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
@@ -4842,6 +4882,9 @@ def cmd_run(rt: Runtime, args) -> int:
 
 
 def cmd_create(rt: Runtime, args) -> int:
+    if args.rest[:1] in (["-h"], ["--help"]):
+        print(RUN_USAGE.format(cmd="create"))
+        return 0
     opts = parse_run_args(args.rest)
     _warn_ignored(opts)
     c = rt.create(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
@@ -4932,11 +4975,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, func, help_text in (("run", cmd_run, "create, start, and run a command"),
                                   ("create", cmd_create, "create a container and print its id")):
-        s = sub.add_parser(name, help=help_text, add_help=False,
-                           usage=f"xcodon {name} [--mount=... | -v H:C[:ro]] [-w DIR] [-e K=V] [--entrypoint E] "
-                                 f"[-u USER] [--name N] [--rm] [-i] [--cidfile F] [--pull missing|always|never] IMAGE [COMMAND...]")
-        s.add_argument("rest", nargs=argparse.REMAINDER)
-        s.set_defaults(func=func)
+        # Docker-style options are parsed by parse_run_args, not argparse: main() splits
+        # argv at the subcommand and hands everything after it over untouched.
+        s = sub.add_parser(name, help=help_text, add_help=False, usage=RUN_USAGE.format(cmd=name))
+        s.set_defaults(func=func, rest=[])
 
     s = sub.add_parser("start", help="start a container's keeper")
     s.add_argument("container")
@@ -4983,10 +5025,13 @@ def _configure_logging(verbosity: int) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    head, rest = _split_argv(list(sys.argv[1:] if argv is None else argv))
     try:
-        args = parser.parse_args(argv)
+        args = parser.parse_args(head)
     except SystemExit as e:
         return int(e.code or 0)
+    if rest is not None:
+        args.rest = rest
     _configure_logging(args.verbose)
     try:
         rt = Runtime(args.home, engine=args.engine)
