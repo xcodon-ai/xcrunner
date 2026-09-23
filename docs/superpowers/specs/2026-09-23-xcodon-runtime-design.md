@@ -265,25 +265,32 @@ involved.
    `pid <child pid>` to the info pipe and exits. The child is pid 1 of the new
    pid namespace and continues. It writes `ready` to the same pipe only after
    step 11, so `start` never returns while mounts are half built.
-6. Mounts a tmpfs on `merged/dev`, then bind-mounts the host `/dev/null`,
+6. Creates a directory with a random name under `merged`, calls
+   `pivot_root(merged, <that directory>)`, and changes directory to `/`.
+   From here on every target path is inside the new root, so a symlink
+   planted in the image can only resolve inside the sandbox, never onto the
+   host. The old root stays mounted at that random-named directory and is the
+   source prefix for the host binds below. A user bind whose target lies under
+   that directory is refused.
+7. Mounts a tmpfs on `/dev`, then bind-mounts the old root's `/dev/null`,
    `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, and `/dev/tty`
-   onto empty files inside it. Mounts `devpts` on `merged/dev/pts` with
+   onto empty files inside it. Mounts `devpts` on `/dev/pts` with
    `newinstance,ptmxmode=0666,mode=0620` and symlinks `ptmx` to `pts/ptmx`.
-   Mounts a tmpfs on `merged/dev/shm`. Symlinks `fd`, `stdin`, `stdout`, and
+   Mounts a tmpfs on `/dev/shm`. Symlinks `fd`, `stdin`, `stdout`, and
    `stderr` to `/proc/self/fd` entries.
-7. Mounts `proc` on `merged/proc`. This is allowed because the keeper owns a
-   fresh pid namespace.
-8. Bind-mounts the host `/sys` read-only on `merged/sys`. A read-only
+8. Mounts `proc` on `/proc`. This is allowed because the keeper owns a fresh
+   pid namespace.
+9. Bind-mounts the old root's `/sys` read-only on `/sys`. A read-only
    remount inside a user namespace must repeat the source mount's locked
    flags (nosuid, nodev, noexec, atime flags), read from
    `/proc/self/mountinfo`, or the kernel refuses it with EPERM.
-9. Bind-mounts `/etc/resolv.conf` and `/etc/hosts` read-only, then each bind
-   from the container config, read-only when asked. Missing mount points are
-   created in the writable layer first, files for files and directories for
-   directories.
-10. Calls `pivot_root(merged, merged/<old root dir>)`, changes directory to
-    `/`, and unmounts the old root with `MNT_DETACH`.
-11. Sets the hostname to the first 12 characters of the container id.
+10. Bind-mounts the old root's `/etc/resolv.conf` and `/etc/hosts` read-only,
+    then each bind from the container config with its source under the old
+    root, read-only when asked. Missing mount points are created in the
+    writable layer first, files for files and directories for directories,
+    replacing an entry of the wrong type. Creates the working directory.
+11. Unmounts the old root with `MNT_DETACH`, removes its directory, and sets
+    the hostname to the first 12 characters of the container id.
 12. Redirects its stdout and stderr to `keeper.log`, installs a SIGCHLD
     handler that reaps every zombie with `waitpid(-1, WNOHANG)`, installs a
     SIGTERM handler that exits, and blocks in `signal.pause()` in a loop.
