@@ -32,11 +32,16 @@ class RuntimeHome:
             d.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
-    def lock(self, name: str) -> Iterator[None]:
-        """Exclusive advisory lock shared by every process using this home."""
+    def lock(self, name: str, shared: bool = False) -> Iterator[None]:
+        """Advisory lock shared by every process using this home.
+
+        Exclusive (the default) by name; pass ``shared=True`` for a shared
+        (reader) lock that can be held by multiple holders at once but waits
+        out any exclusive (writer) holder of the same name, and vice versa.
+        """
         fd = os.open(self.locks / f"{name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)

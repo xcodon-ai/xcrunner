@@ -94,39 +94,47 @@ class ImageStore:
             return self.import_fetched(fetched, reference.name)
 
     def import_fetched(self, fetched: FetchedImage, ref_name: str) -> Image:
-        image_id = fetched.config_digest.split(":", 1)[1]
-        diff_ids = fetched.config.get("rootfs", {}).get("diff_ids", [])
-        if len(diff_ids) != len(fetched.layers):
-            raise PullError(f"config lists {len(diff_ids)} diff_ids but manifest has {len(fetched.layers)} layers")
-        layer_dirs = [self._ensure_layer(diff_id, layer.blob_path) for diff_id, layer in zip(diff_ids, fetched.layers)]
+        """Import a fetched image.
 
-        image_dir = self.home.images / image_id
-        with self.home.lock(f"image-{image_id}"):
-            if not image_dir.exists():
-                with self.home.atomic_dir(image_dir) as tmp:
-                    (tmp / "config.json").write_text(json.dumps(fetched.config, indent=2))
-                    (tmp / "manifest.json").write_text(
-                        json.dumps(
-                            {
-                                "config": fetched.config_digest,
-                                "diff_ids": diff_ids,
-                                "layers": [{"digest": l.digest, "mediaType": l.media_type, "size": l.size} for l in fetched.layers],
-                                "source": fetched.source,
-                            },
-                            indent=2,
+        Holds ``store`` shared (a reader), so a concurrent ``prune`` (which
+        takes ``store`` exclusive) cannot delete a layer while it is being
+        extracted or read here, or an image directory while it is being
+        built. Lock order: pull -> store -> layer/image/refs.
+        """
+        with self.home.lock("store", shared=True):
+            image_id = fetched.config_digest.split(":", 1)[1]
+            diff_ids = fetched.config.get("rootfs", {}).get("diff_ids", [])
+            if len(diff_ids) != len(fetched.layers):
+                raise PullError(f"config lists {len(diff_ids)} diff_ids but manifest has {len(fetched.layers)} layers")
+            layer_dirs = [self._ensure_layer(diff_id, layer.blob_path) for diff_id, layer in zip(diff_ids, fetched.layers)]
+
+            image_dir = self.home.images / image_id
+            with self.home.lock(f"image-{image_id}"):
+                if not image_dir.exists():
+                    with self.home.atomic_dir(image_dir) as tmp:
+                        (tmp / "config.json").write_text(json.dumps(fetched.config, indent=2))
+                        (tmp / "manifest.json").write_text(
+                            json.dumps(
+                                {
+                                    "config": fetched.config_digest,
+                                    "diff_ids": diff_ids,
+                                    "layers": [{"digest": l.digest, "mediaType": l.media_type, "size": l.size} for l in fetched.layers],
+                                    "source": fetched.source,
+                                },
+                                indent=2,
+                            )
                         )
-                    )
-                    log.info("flattening %d layers for %s", len(layer_dirs), image_id[:12])
-                    build_rootfs(layer_dirs, tmp / "rootfs")
-        for layer in fetched.layers:
-            layer.blob_path.unlink(missing_ok=True)
-        (self.home.blobs / image_id).unlink(missing_ok=True)
+                        log.info("flattening %d layers for %s", len(layer_dirs), image_id[:12])
+                        build_rootfs(layer_dirs, tmp / "rootfs")
+            for layer in fetched.layers:
+                layer.blob_path.unlink(missing_ok=True)
+            (self.home.blobs / image_id).unlink(missing_ok=True)
 
-        with self.home.lock("refs"):
-            refs = self.home.read_refs()
-            refs[ref_name] = image_id
-            self.home.write_refs(refs)
-        return self._load(image_id)
+            with self.home.lock("refs"):
+                refs = self.home.read_refs()
+                refs[ref_name] = image_id
+                self.home.write_refs(refs)
+            return self._load(image_id)
 
     def _ensure_layer(self, diff_id: str, blob_path: Path) -> Path:
         hexdigest = diff_id.split(":", 1)[1]
@@ -146,24 +154,31 @@ class ImageStore:
     # -- remove / inspect / prune ------------------------------------------------
 
     def remove(self, ref_or_id: str) -> None:
-        img = self.require(ref_or_id)
-        with self.home.lock("refs"):
-            refs = self.home.read_refs()
-            try:
-                name = parse_reference(ref_or_id).name
-            except ValueError:
-                name = None
-            if name in refs:
-                del refs[name]
-            else:
-                for n in list(refs):
-                    if refs[n] == img.id:
-                        del refs[n]
-            self.home.write_refs(refs)
-            still_referenced = img.id in refs.values()
-        if not still_referenced:
-            with self.home.lock(f"image-{img.id}"):
-                shutil.rmtree(img.dir, ignore_errors=True)
+        """Drop a ref and, if nothing else references the image, delete it.
+
+        Holds ``store`` exclusive (a writer), so no concurrent ``pull`` can
+        add a ref to this image between the refs update and the directory
+        delete. Lock order: pull -> store -> layer/image/refs.
+        """
+        with self.home.lock("store"):
+            img = self.require(ref_or_id)
+            with self.home.lock("refs"):
+                refs = self.home.read_refs()
+                try:
+                    name = parse_reference(ref_or_id).name
+                except ValueError:
+                    name = None
+                if name in refs:
+                    del refs[name]
+                else:
+                    for n in list(refs):
+                        if refs[n] == img.id:
+                            del refs[n]
+                self.home.write_refs(refs)
+                still_referenced = img.id in refs.values()
+            if not still_referenced:
+                with self.home.lock(f"image-{img.id}"):
+                    shutil.rmtree(img.dir, ignore_errors=True)
 
     def inspect(self, ref_or_id: str) -> list[dict]:
         img = self.get(ref_or_id)
@@ -184,15 +199,22 @@ class ImageStore:
         ]
 
     def prune(self) -> list[Path]:
-        """Remove leftovers and layers no stored image references."""
-        removed = self.home.prune_leftovers()
-        used: set[str] = set()
-        for img in self.images():
-            manifest = json.loads((img.dir / "manifest.json").read_text())
-            used.update(d.split(":", 1)[1] for d in manifest.get("diff_ids", []))
-        for layer_dir in self.home.layers.iterdir():
-            if layer_dir.name not in used:
-                with self.home.lock(f"layer-{layer_dir.name}"):
-                    shutil.rmtree(layer_dir, ignore_errors=True)
-                removed.append(layer_dir)
-        return removed
+        """Remove leftovers and layers no stored image references.
+
+        Holds ``store`` exclusive (a writer), so it waits out any pull that
+        is still extracting a layer or building an image (those hold
+        ``store`` shared), and no such pull can start once pruning has begun.
+        Lock order: pull -> store -> layer/image/refs.
+        """
+        with self.home.lock("store"):
+            removed = self.home.prune_leftovers()
+            used: set[str] = set()
+            for img in self.images():
+                manifest = json.loads((img.dir / "manifest.json").read_text())
+                used.update(d.split(":", 1)[1] for d in manifest.get("diff_ids", []))
+            for layer_dir in self.home.layers.iterdir():
+                if layer_dir.name not in used:
+                    with self.home.lock(f"layer-{layer_dir.name}"):
+                        shutil.rmtree(layer_dir, ignore_errors=True)
+                    removed.append(layer_dir)
+            return removed

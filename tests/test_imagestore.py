@@ -3,10 +3,13 @@ import hashlib
 import io
 import json
 import tarfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+import xcodon_runtime.imagestore as imagestore
 from xcodon_runtime.errors import ImageNotFound, PullError
 from xcodon_runtime.imagestore import ImageStore
 from xcodon_runtime.reference import Platform
@@ -150,3 +153,41 @@ def test_layer_count_mismatch_is_error(home):
     st = ImageStore(home, sources=[Bad(home, [{"a": b"A"}])])
     with pytest.raises(PullError, match="diff_ids"):
         st.pull("x/y")
+
+
+def test_second_pull_of_same_image_skips_layer_extraction(store, monkeypatch):
+    st, src = store
+    real_extract_layer = imagestore.extract_layer
+    calls = {"n": 0}
+
+    def counting_extract_layer(stream, dest):
+        calls["n"] += 1
+        return real_extract_layer(stream, dest)
+
+    monkeypatch.setattr(imagestore, "extract_layer", counting_extract_layer)
+
+    st.pull("example/app:v1")
+    after_first = calls["n"]
+    assert after_first == 2  # one call per layer in the fake source
+
+    st.pull("example/app:v1")
+    assert calls["n"] == after_first, "second pull of the same image must not re-extract already-stored layers"
+
+
+def test_prune_waits_for_in_progress_import(store):
+    st, _ = store
+    st.pull("example/app:v1")  # populate at least one layer so prune has work either way
+
+    result: dict = {}
+
+    def run_prune():
+        result["pruned"] = st.prune()
+
+    with st.home.lock("store", shared=True):
+        t = threading.Thread(target=run_prune)
+        t.start()
+        time.sleep(0.1)
+        assert t.is_alive(), "prune should block while a shared (import) holder has the store lock"
+
+    t.join()
+    assert "pruned" in result

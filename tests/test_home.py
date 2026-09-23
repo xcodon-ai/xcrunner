@@ -65,6 +65,39 @@ def test_lock_is_exclusive(home):
     assert order == ["a-in", "a-out", "b-in", "b-out"]
 
 
+def test_shared_lock_allows_overlap_but_waits_for_exclusive(home):
+    order = []
+
+    def reader(name, hold):
+        with home.lock("rw", shared=True):
+            order.append(f"{name}-in")
+            time.sleep(hold)
+            order.append(f"{name}-out")
+
+    def writer(name, hold):
+        with home.lock("rw"):
+            order.append(f"{name}-in")
+            time.sleep(hold)
+            order.append(f"{name}-out")
+
+    t1 = threading.Thread(target=reader, args=("r1", 0.2))
+    t2 = threading.Thread(target=reader, args=("r2", 0.2))
+    t1.start()
+    time.sleep(0.05)
+    t2.start()
+    time.sleep(0.05)
+    t3 = threading.Thread(target=writer, args=("w", 0))
+    t3.start()
+    t1.join()
+    t2.join()
+    t3.join()
+    # both readers are inside before either finishes: their holds overlap
+    assert order.index("r2-in") < order.index("r1-out")
+    # the exclusive holder starts only after both readers are out
+    assert order.index("w-in") > order.index("r1-out")
+    assert order.index("w-in") > order.index("r2-out")
+
+
 def test_refs_round_trip(home):
     assert home.read_refs() == {}
     home.write_refs({"docker.io/library/a:latest": "1" * 64})
