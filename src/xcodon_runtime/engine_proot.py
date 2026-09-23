@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from xcodon_runtime.containers import Container
+from xcodon_runtime.engine import Bind
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
 
 log = logging.getLogger(__name__)
@@ -38,33 +39,83 @@ def find_proot() -> str | None:
 
 def _copy_rootfs(src: Path, dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(["cp", "-a", "--reflink=auto", f"{src}/.", str(dst)], capture_output=True, text=True)
+    try:
+        r = subprocess.run(["cp", "-a", "--reflink=auto", f"{src}/.", str(dst)], capture_output=True, text=True)
+    except OSError as e:
+        log.info("cp is not available (%s); falling back to Python copy", e)
+        r = subprocess.CompletedProcess(["cp"], 1, "", str(e))
     if r.returncode != 0:
         log.info("cp --reflink failed (%s); falling back to Python copy", r.stderr.strip())
         shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(src, dst, symlinks=True)
+        try:
+            shutil.copytree(src, dst, symlinks=True)
+        except OSError as e:
+            shutil.rmtree(dst, ignore_errors=True)
+            raise EngineUnavailable(f"could not copy image rootfs for the proot engine: {e}") from e
 
 
-def _command_exists(rootfs: Path, workdir: str, argv0: str, path_env: str) -> bool:
-    """Whether argv0 resolves to an executable regular file in the guest rootfs.
+EXIT_CANNOT_EXEC = 126
+EXIT_NOT_FOUND = 127
 
-    Mirrors the lookup a shell would do: an absolute path is checked directly,
-    a path with a slash is relative to the working directory, and a bare name
-    is searched on the guest PATH. PRoot itself refuses to even start when its
-    initial command cannot be found this way, so we check first and report
-    "command not found" (exit code 127, the container-engine convention) the
-    same way whether or not PRoot could have started.
+
+def _guest_join(base: str, rel: str) -> str:
+    """Join a guest-absolute base with a relative component, guest (posix) style."""
+    return base.rstrip("/") + "/" + rel.lstrip("/")
+
+
+def _guest_to_host(rootfs: Path, binds: list[Bind], guest_path: str) -> Path:
+    """Map a guest-absolute path to the host path PRoot would actually use.
+
+    A bind remaps everything under its target to its source; the longest
+    matching target wins, same as PRoot's own overlapping-bind rule. Anything
+    not under a bind lives under the copied rootfs.
     """
-    if argv0.startswith("/"):
-        candidates = [rootfs / argv0.lstrip("/")]
-    elif "/" in argv0:
-        candidates = [rootfs / workdir.lstrip("/") / argv0]
+    best_target = None
+    best_source = None
+    for b in binds:
+        target = b.target.rstrip("/") or "/"
+        matches = guest_path == target or (target == "/") or guest_path.startswith(target + "/")
+        if matches and (best_target is None or len(target) > len(best_target)):
+            best_target, best_source = target, b.source
+    if best_target is not None:
+        remainder = guest_path[len(best_target):] if best_target != "/" else guest_path
+        return Path(best_source) / remainder.lstrip("/")
+    return rootfs / guest_path.lstrip("/")
+
+
+def _resolve_guest(container: Container, workdir: str, command: str, path_value: str) -> tuple[str | None, int]:
+    """Find command on the guest PATH, the way PRoot's own initial-command lookup would.
+
+    Returns the resolved host path and 0, or None with the exit code to use:
+    126 when a matching guest file exists but is not an executable regular
+    file, 127 when nothing matches. Candidates are the command itself if it
+    contains a slash (a relative one joined to the working directory), else
+    each PATH entry joined with the command; each guest candidate is then
+    mapped to a host path through the container's binds (see
+    ``_guest_to_host``), mirroring ``nsexec._resolve``.
+    """
+    rootfs = container.dir / "rootfs"
+    if "/" in command:
+        guest_candidates = [command if command.startswith("/") else _guest_join(workdir, command)]
     else:
-        candidates = [rootfs / p.lstrip("/") / argv0 for p in path_env.split(":") if p]
-    return any(p.is_file() and os.access(p, os.X_OK) for p in candidates)
+        guest_candidates = [_guest_join(d, command) for d in path_value.split(":") if d]
+    exists = False
+    for guest in guest_candidates:
+        host = _guest_to_host(rootfs, container.binds, guest)
+        if host.is_file() and os.access(host, os.X_OK):
+            return str(host), 0
+        if host.exists():
+            exists = True
+    return None, EXIT_CANNOT_EXEC if exists else EXIT_NOT_FOUND
 
 
 class ProotEngine:
+    """The proot engine: a copied rootfs, PRoot per exec.
+
+    PRoot cannot enforce read-only binds (it has no kernel mount to make
+    read-only); a readonly bind is mounted writable and a warning is logged.
+    """
+
     name = "proot"
 
     def start(self, container: Container) -> None:
@@ -75,7 +126,7 @@ class ProotEngine:
                 "or use an x86_64 build with the vendored binary"
             )
         rootfs = container.dir / "rootfs"
-        if not (container.dir / STARTED_MARKER).exists():
+        if not rootfs.is_dir() or not any(rootfs.iterdir()):
             log.info(
                 "container %s: copying rootfs (full copy unless the filesystem supports reflinks)",
                 container.short_id,
@@ -85,7 +136,12 @@ class ProotEngine:
         (rootfs / container.workdir.lstrip("/")).mkdir(parents=True, exist_ok=True)
 
     def is_running(self, container: Container) -> bool:
-        return (container.dir / STARTED_MARKER).exists() and (container.dir / "rootfs").is_dir()
+        rootfs = container.dir / "rootfs"
+        return (
+            (container.dir / STARTED_MARKER).exists()
+            and rootfs.is_dir()
+            and any(rootfs.iterdir())
+        )
 
     def popen(self, container: Container, argv: list[str], env: dict[str, str], workdir: str,
               **popen_kwargs) -> subprocess.Popen:
@@ -96,12 +152,20 @@ class ProotEngine:
             raise EngineUnavailable("PRoot binary disappeared; set XCODON_PROOT")
         rootfs = container.dir / "rootfs"
         (rootfs / workdir.lstrip("/")).mkdir(parents=True, exist_ok=True)
-        if argv and not _command_exists(rootfs, workdir, argv[0], env.get("PATH", "")):
-            # PRoot cannot even start if its initial command is missing; report
-            # "command not found" (127) the way a container engine does, instead
-            # of PRoot's own fatal startup error.
-            log.info("container %s: %s not found in guest rootfs", container.short_id, argv[0])
-            return subprocess.Popen([sys.executable, "-c", "raise SystemExit(127)"], **popen_kwargs)
+        if argv:
+            _, code = _resolve_guest(container, workdir, argv[0], env.get("PATH", ""))
+            if code != 0:
+                # PRoot cannot even start if its initial command is missing or
+                # not executable; report the container-engine convention (126
+                # or 127) instead of PRoot's own fatal startup error.
+                log.info("container %s: %s resolves to exit code %d", container.short_id, argv[0], code)
+                return subprocess.Popen([sys.executable, "-c", f"raise SystemExit({code})"], **popen_kwargs)
+        readonly_targets = [b.target for b in container.binds if b.readonly]
+        if readonly_targets:
+            log.warning(
+                "proot engine cannot enforce read-only binds; %s is writable",
+                ", ".join(readonly_targets),
+            )
         cmd = [proot, "-r", str(rootfs), "-w", workdir, "-i", f"{container.uid}:{container.gid}"]
         for host_path in HOST_BINDS:
             if os.path.exists(host_path):
