@@ -21,31 +21,41 @@ _SKIP_TYPES = {tarfile.CHRTYPE, tarfile.BLKTYPE, tarfile.FIFOTYPE}
 
 def open_layer_stream(path: Path) -> BinaryIO:
     """Open a layer blob and return a stream of the uncompressed tar."""
-    f = open(path, "rb")
-    head = f.read(4)
-    f.seek(0)
+    # Sniff magic bytes to detect compression format.
+    with open(path, "rb") as f:
+        head = f.read(4)
+
     if head.startswith(GZIP_MAGIC):
-        return gzip.GzipFile(fileobj=f)  # type: ignore[return-value]
+        return gzip.open(path, "rb")  # type: ignore[return-value]
     if head.startswith(ZSTD_MAGIC):
         try:
             import zstandard
         except ImportError:
-            f.close()
             raise UnsupportedLayer(
                 f"{path.name} is zstd-compressed; install the extra: pip install 'xcodon-runtime[zstd]'"
             ) from None
-        return zstandard.ZstdDecompressor().stream_reader(f)  # type: ignore[return-value]
-    return f
+        return zstandard.ZstdDecompressor().stream_reader(  # type: ignore[return-value]
+            open(path, "rb")
+        )
+    return open(path, "rb")
 
 
 def _layer_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo | None:
     """The stdlib ``tar`` filter, plus owner read/write so later entries can land inside."""
     member = tarfile.tar_filter(member, dest)
+    # Clear ownership (tar ownership is ignored; files belong to the invoking user).
+    mode = member.mode if member.mode is not None else (0o755 if member.isdir() else 0o644)
     if member.isdir():
-        return member.replace(mode=(member.mode or 0o755) | 0o700)
+        return member.replace(
+            uid=None, gid=None, uname=None, gname=None,
+            mode=mode | 0o700
+        )
     if member.isreg():
-        return member.replace(mode=(member.mode or 0o644) | 0o600)
-    return member
+        return member.replace(
+            uid=None, gid=None, uname=None, gname=None,
+            mode=mode | 0o600
+        )
+    return member.replace(uid=None, gid=None, uname=None, gname=None)
 
 
 def extract_layer(stream: BinaryIO, dest: Path) -> int:

@@ -1,14 +1,16 @@
+import gc
 import gzip
 import io
 import os
 import stat
 import tarfile
+import warnings
 from pathlib import Path
 
 import pytest
 
 from xcodon_runtime.errors import UnsupportedLayer
-from xcodon_runtime.tarlayer import extract_layer, open_layer_stream
+from xcodon_runtime.tarlayer import extract_layer, open_layer_stream, _layer_filter
 
 
 def make_tar(entries) -> bytes:
@@ -111,3 +113,32 @@ def test_open_layer_stream_zstd_without_module(tmp_path, monkeypatch):
     (tmp_path / "z").write_bytes(b"\x28\xb5\x2f\xfd" + b"\x00" * 16)
     with pytest.raises(UnsupportedLayer, match="zstd"):
         open_layer_stream(tmp_path / "z")
+
+
+def test_open_layer_stream_gzip_no_resource_leak(tmp_path):
+    raw = make_tar([(ti("f"), b"1")])
+    gz_path = tmp_path / "gz"
+    gz_path.write_bytes(gzip.compress(raw))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        s = open_layer_stream(gz_path)
+        s.close()
+        gc.collect()
+        resource_warnings = [x for x in w if issubclass(x.category, ResourceWarning)]
+        assert len(resource_warnings) == 0, f"ResourceWarning: {resource_warnings}"
+
+
+def test_layer_filter_clears_ownership(tmp_path):
+    member = ti("file", uid=12345, gid=12345)
+    member.uname = "nobody"
+    member.gname = "nogroup"
+    filtered = _layer_filter(member, str(tmp_path))
+    assert filtered.uid is None
+    assert filtered.gid is None
+    assert filtered.uname is None
+    assert filtered.gname is None
+
+    # Also test that extracted files have the current user's uid
+    data = make_tar([(ti("file", uid=12345, gid=12345), b"content")])
+    extract_layer(io.BytesIO(data), tmp_path)
+    assert os.lstat(tmp_path / "file").st_uid == os.getuid()
