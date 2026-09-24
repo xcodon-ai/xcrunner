@@ -28,18 +28,29 @@ def env_layer_dir(env_dir: str, image_id: str) -> Path:
 
 
 def prepare_env_layer(container: "Container") -> Path:
-    """Create the layer directory for this container's image and record what it is for."""
+    """Create the layer directory for this container's image and record what it is for.
+
+    The record is written once, the first time any container uses this layer.
+    Two starters can race here (the proot engine allows two containers of the
+    same image to share a layer), so the create is exclusive: the loser of
+    the race just finds the file already there.
+    """
     assert container.env_dir is not None
     layer = env_layer_dir(container.env_dir, container.image_id)
     layer.mkdir(parents=True, exist_ok=True)
     info = layer / ENV_INFO_NAME
-    if not info.exists():
-        info.write_text(json.dumps({
-            "image_ref": container.image_ref,
-            "image_id": container.image_id,
-            "engine": container.engine,
-            "first_used": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }, indent=2))
+    try:
+        fd = os.open(info, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps({
+                "image_ref": container.image_ref,
+                "image_id": container.image_id,
+                "engine": container.engine,
+                "first_used": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }, indent=2))
     return layer
 
 

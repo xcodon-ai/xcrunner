@@ -108,9 +108,11 @@ class Runtime:
             env_dir_s = str(env_dir)
             if not os.path.isabs(env_dir_s):
                 raise XcodonError(f"env_dir must be an absolute path: {env_dir_s}")
-            Path(env_dir_s).mkdir(parents=True, exist_ok=True)
         engine = self.engine_choice().name
-        return self.store.create(container_id, image, ref, spec, list(binds), engine, name, env_dir=env_dir_s)
+        c = self.store.create(container_id, image, ref, spec, list(binds), engine, name, env_dir=env_dir_s)
+        if env_dir_s is not None:
+            Path(env_dir_s).mkdir(parents=True, exist_ok=True)
+        return c
 
     def start(self, c: Container) -> None:
         self._engine(c).start(c)

@@ -115,3 +115,41 @@ def test_run_with_env_dir(rt, tmp_path):
     env = tmp_path / "env"
     assert rt.run("xcodon-test/busybox", command=["/bin/sh", "-c", "echo r > /from-run"], rm=True, env_dir=env) == 0
     assert rt.run("xcodon-test/busybox", command=["/bin/cat", "/from-run"], rm=True, env_dir=env) == 0
+
+
+def test_prepare_env_layer_is_race_safe(rt, busybox_image, tmp_path):
+    from xcodon_runtime.envdir import prepare_env_layer
+
+    env = tmp_path / "env"
+    c = rt.create("xcodon-test/busybox", env_dir=env)
+    results: list[Path] = []
+
+    def call():
+        results.append(prepare_env_layer(c))
+
+    threads = [threading.Thread(target=call) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    layer = results[0]
+    assert all(r == layer for r in results)
+    info_path = layer / ENV_INFO_NAME
+    info = json.loads(info_path.read_text())
+    assert info["image_id"] == busybox_image.id
+    first_used = info["first_used"]
+
+    prepare_env_layer(c)  # a later call must not touch the record
+    again = json.loads(info_path.read_text())
+    assert again["first_used"] == first_used
+
+
+def test_env_dir_not_created_on_duplicate_name(rt, tmp_path):
+    from xcodon_runtime.errors import XcodonError
+
+    rt.create("xcodon-test/busybox", name="dup")
+    fresh = tmp_path / "fresh-env"
+    with pytest.raises(XcodonError):
+        rt.create("xcodon-test/busybox", name="dup", env_dir=fresh)
+    assert not fresh.exists(), "env_dir must not be created when the store.create fails"
