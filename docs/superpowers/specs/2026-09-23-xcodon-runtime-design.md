@@ -616,6 +616,8 @@ Layout:
   upper/ work/   the writable layer                      (ns engine)
   rootfs/        the persistent rootfs copy              (proot engine)
   .lock          held by the running container's keeper (ns engine)
+  holder         short id of the container holding the lock (ns engine)
+  .copy.lock     guards the first rootfs copy                (proot engine)
 ```
 
 The layer is keyed by image id. A rebuilt base image has a new id and gets
@@ -632,10 +634,17 @@ container with an env folder therefore takes an exclusive `flock` on
 `<env-dir>/<image-id>/.lock`. The starter acquires it and passes the open
 descriptor to the keeper, so the lock lives exactly as long as the container
 runs and survives the starting process exiting. A second start for the same
-image and env folder logs one line saying it is waiting and blocks until the
-first container stops. The proot engine has no kernel restriction; two proot
-containers may share a rootfs copy, and only the first copy is guarded by a
-short lock.
+image and env folder logs a warning naming the holding container and the
+`xrunner stop` command that frees it, repeats it every 60 seconds, and
+blocks until the first container stops. There is no timeout. When the
+keeper fails to start with an env folder, the error says the folder must be
+on a local filesystem that supports overlay upper layers. Stopping a
+container removes overlayfs's leftover `work/work` only while it can still
+take the layer lock, so it never deletes the next container's work
+directory. The proot engine has no kernel restriction; two proot containers
+may share a rootfs copy. The first copy is made into `rootfs.tmp` and
+renamed under `.copy.lock` inside the layer, so an interrupted copy is never
+mistaken for a complete one.
 
 ### 10.4 Interfaces
 

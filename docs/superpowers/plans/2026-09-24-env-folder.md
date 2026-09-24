@@ -340,8 +340,7 @@ Replace every `container.dir / "rootfs"` in `start`, `is_running`, and `popen` w
 ```python
             rootfs = self.rootfs_path(container)
             if not rootfs.is_dir() or not any(rootfs.iterdir()):
-                home = RuntimeHome(container.dir.parent.parent)
-                with home.lock(f"envlayer-{container.image_id}"):
+                with _copy_lock(layer_dir):  # flock on <layer>/.copy.lock (final-review ruling F4)
                     if not rootfs.is_dir() or not any(rootfs.iterdir()):
                         log.info("container %s: copying rootfs (full copy unless the filesystem supports reflinks)",
                                  container.short_id)
