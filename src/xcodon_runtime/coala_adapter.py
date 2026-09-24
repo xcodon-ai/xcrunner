@@ -37,6 +37,44 @@ def _read_log_tail(container: Container, tail: int) -> str:
     return "\n".join(lines[-tail:])
 
 
+class _CoalaContainer:
+    """A docker-py-shaped view of an xcodon container.
+
+    coala-runtime's executor calls ``reload()`` and reads ``status`` on the
+    object the manager returns (docker-py and the Singularity manager both
+    expose these). The bare ``Container`` dataclass does not, so the manager
+    hands back this thin view and unwraps it on the way back in.
+    """
+
+    def __init__(self, runtime: Runtime, container: Container) -> None:
+        self._runtime = runtime
+        self.container = container
+        self.status = container.state
+
+    @property
+    def id(self) -> str:
+        return self.container.id
+
+    @property
+    def short_id(self) -> str:
+        return self.container.short_id
+
+    def reload(self) -> None:
+        """Refresh ``status`` from the engine, the way ``docker reload`` does."""
+        c = self._runtime.get_container(self.container.id)
+        self.container = c
+        self.status = c.state
+
+    def __getattr__(self, name):
+        # Delegate anything not defined here (dir, name, engine, ...) to the container.
+        return getattr(self.__dict__["container"], name)
+
+
+def _unwrap(container) -> Container:
+    """Accept either a ``_CoalaContainer`` view or a raw ``Container``."""
+    return getattr(container, "container", container)
+
+
 class XcodonContainerManager:
     """Rootfs files are owned by the invoking user and the writable layer persists, so installs work."""
 
@@ -73,27 +111,28 @@ class XcodonContainerManager:
         )
         self.containers[c.id] = c
         log.info("created xcodon container %s for %s", c.short_id, image)
-        return c
+        return _CoalaContainer(self.runtime, c)
 
-    async def start_container(self, container: Container) -> None:
-        await _call(self.runtime.start, container)
+    async def start_container(self, container) -> None:
+        await _call(self.runtime.start, _unwrap(container))
 
     async def exec_command(
         self,
-        container: Container,
+        container,
         command: Union[str, Sequence[str]],
         workdir: Optional[str] = None,
         environment: Optional[Dict[str, str]] = None,
     ) -> tuple[int, bytes, bytes]:
-        result = await _call(self.runtime.exec, container, command, workdir=workdir, env=environment)
+        result = await _call(self.runtime.exec, _unwrap(container), command, workdir=workdir, env=environment)
         return result.code, result.stdout, result.stderr
 
-    async def get_logs(self, container: Container, tail: int = 1000) -> str:
-        return await _call(_read_log_tail, container, tail)
+    async def get_logs(self, container, tail: int = 1000) -> str:
+        return await _call(_read_log_tail, _unwrap(container), tail)
 
-    async def remove_container(self, container: Container, force: bool = True) -> None:
-        await _call(self.runtime.remove, container, force=force)
-        self.containers.pop(container.id, None)
+    async def remove_container(self, container, force: bool = True) -> None:
+        c = _unwrap(container)
+        await _call(self.runtime.remove, c, force=force)
+        self.containers.pop(c.id, None)
 
     async def cleanup_all(self) -> None:
         for c in list(self.containers.values()):

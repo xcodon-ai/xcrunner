@@ -116,3 +116,23 @@ def test_cleanup_all_continues_after_one_failure(manager, monkeypatch):
         assert b.id not in manager.containers
 
     asyncio.run(flow())
+
+
+def test_returned_container_reloads_and_reports_status(home, busybox_image, engine_name):
+    """coala-runtime's executor calls reload() and reads status after start."""
+    mgr = XcodonContainerManager(home.path, engine=engine_name)
+
+    async def flow():
+        c = await mgr.create_container("xcodon-test/busybox:latest", command="sleep 100", working_dir="/workspace")
+        assert hasattr(c, "reload") and hasattr(c, "status") and hasattr(c, "id")
+        assert c.status == "created"
+        await mgr.start_container(c)
+        c.reload()  # sync, exactly as coala-runtime calls it
+        assert c.status == "running", c.status
+        code, out, _ = await mgr.exec_command(c, "echo hi")
+        assert (code, out) == (0, b"hi\n")
+        await mgr.remove_container(c)
+        c2 = await mgr.create_container("xcodon-test/busybox:latest")
+        await mgr.remove_container(c2)  # never started; still removable via the view
+
+    asyncio.run(flow())
