@@ -38,7 +38,7 @@ IGNORED_FLAGS = {
 RUN_FLAGS = {
     "--mount": True, "-v": True, "--volume": True, "-w": True, "--workdir": True, "-e": True, "--env": True,
     "--entrypoint": True, "-u": True, "--user": True, "--name": True, "--rm": False, "-i": False,
-    "--interactive": False, "--cidfile": True, "--pull": True,
+    "--interactive": False, "--cidfile": True, "--pull": True, "--env-dir": True,
 }
 
 
@@ -55,6 +55,7 @@ class RunOptions:
     rm: bool = False
     pull: str = "missing"
     cidfile: str | None = None
+    env_dir: str | None = None
     ignored: list[str] = field(default_factory=list)
 
 
@@ -155,12 +156,14 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
             if value not in ("missing", "always", "never"):
                 raise UsageError("--pull must be missing, always, or never")
             opts.pull = value
+        elif flag == "--env-dir":
+            opts.env_dir = os.path.abspath(value)
         # -i / --interactive: stdin always passes through
     raise UsageError("no image given: usage: xrunner run [OPTIONS] IMAGE [COMMAND...]")
 
 
 RUN_USAGE = ("xrunner {cmd} [--mount=... | -v HOST:CONTAINER[:ro]] [-w DIR] [-e K=V] [--entrypoint E] "
-             "[-u USER] [--name N] [--rm] [-i] [--cidfile F] [--pull missing|always|never] IMAGE [COMMAND...]")
+             "[-u USER] [--name N] [--rm] [-i] [--cidfile F] [--pull missing|always|never] [--env-dir DIR] IMAGE [COMMAND...]")
 
 _GLOBAL_OPTIONS_WITH_VALUE = {"--engine", "--home"}
 
@@ -226,7 +229,7 @@ def cmd_run(rt: Runtime, args) -> int:
     _warn_ignored(opts)
     return rt.run(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
                   workdir=opts.workdir, env=opts.env, user=opts.user, name=opts.name, rm=opts.rm,
-                  pull=opts.pull, cidfile=opts.cidfile)
+                  pull=opts.pull, cidfile=opts.cidfile, env_dir=opts.env_dir)
 
 
 def cmd_create(rt: Runtime, args) -> int:
@@ -236,7 +239,8 @@ def cmd_create(rt: Runtime, args) -> int:
     opts = parse_run_args(args.rest)
     _warn_ignored(opts)
     c = rt.create(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
-                  workdir=opts.workdir, env=opts.env, user=opts.user, name=opts.name, pull=opts.pull)
+                  workdir=opts.workdir, env=opts.env, user=opts.user, name=opts.name, pull=opts.pull,
+                  env_dir=opts.env_dir)
     if opts.cidfile:
         _write_cidfile(opts.cidfile, c.id)
     print(c.id)

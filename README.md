@@ -33,6 +33,14 @@ On aarch64 hosts without user namespaces, provide a PRoot binary with
     xrunner prune                           # leftovers: half-built dirs and orphan blobs
     xrunner prune --all                     # also unused layers and day-old exited containers
 
+    xrunner run --rm --env-dir $PWD/.xrunner-env python:3.12-slim pip install numpy
+    xrunner run --rm --env-dir $PWD/.xrunner-env python:3.12-slim python -c 'import numpy'
+
+`--env-dir` keeps the container's writable layer in a host folder, keyed by
+image id, so tools installed in one container are there for the next one.
+Delete `<env-dir>/<image-id>` to reset. coala-runtime uses this through the
+`XRUNNER_ENV_DIR` variable.
+
 Two global flags come before the subcommand: `--engine ns|proot` forces an
 engine, and `--home DIR` picks the state directory for this one command.
 

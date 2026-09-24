@@ -203,3 +203,25 @@ def test_logs_on_a_proot_container_explains_there_is_none(home, busybox_image, c
     out, err = capfd.readouterr()
     assert out == ""
     assert "no keeper log: proot engine" in err
+
+
+def test_parse_run_args_env_dir_is_absolutized(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    opts = cli.parse_run_args(["--env-dir", "myenv", "img", "true"])
+    assert opts.env_dir == str(tmp_path / "myenv")
+    opts = cli.parse_run_args(["--env-dir=/abs/env", "img"])
+    assert opts.env_dir == "/abs/env"
+    assert cli.parse_run_args(["img"]).env_dir is None
+
+
+def test_cli_env_dir_persists_installs(home, busybox_image, engine_name, tmp_path, capfd):
+    e = ["--engine", engine_name]
+    env = tmp_path / "env"
+    assert cli.main([*e, "run", "--rm", f"--env-dir={env}", "xcodon-test/busybox", "/bin/sh", "-c", "mkdir -p /usr/local && echo tool > /usr/local/tool"]) == 0
+    assert cli.main([*e, "run", "--rm", f"--env-dir={env}", "xcodon-test/busybox", "/bin/cat", "/usr/local/tool"]) == 0
+    assert capfd.readouterr().out.strip().endswith("tool")
+    assert cli.main([*e, "create", "--name", "envc", f"--env-dir={env}", "xcodon-test/busybox", "/bin/sh"]) == 0
+    c = cli.Runtime(home.path, engine=engine_name).get_container("envc")
+    assert c.env_dir == str(env)
+    assert cli.main([*e, "rm", "envc"]) == 0
+    assert (env / c.image_id).is_dir()
