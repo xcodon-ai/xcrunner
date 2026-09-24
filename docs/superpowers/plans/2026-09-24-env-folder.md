@@ -15,7 +15,7 @@
 - Python `>=3.10`, stdlib only, plain English docstrings and messages; every error derives from `XcodonError`.
 - Env layer path is `<env_dir>/<image_id>/` with `upper/`, `work/` (ns) or `rootfs/` (proot), `image.json`, `.lock`. `merged/`, `config.json`, `keeper.pid`, `keeper.log` stay in the container directory. `xrunner rm` never touches the env folder.
 - Concurrency: an ns start with an env folder holds `flock(LOCK_EX)` on `.lock` for the keeper's lifetime by inheriting the descriptor; a second start logs one wait line and blocks. proot guards only the first copy.
-- CLI flag is `--env-dir DIR` (never `--env`). Adapter env var is `XRUNNER_ENV_DIR`. opencodon tools field is `xrunner_env_project_relative`, default `workspace/.xrunner-env`, set only when the effective engine is `xrunner`.
+- CLI flag is `--env-dir DIR` (never `--env`). Adapter env var is `XRUNNER_ENV_DIR`. opencodon tools field is `xrunner_env_project_relative`, default `.xrunner-env` (project root, outside `workspace/` where the agent's file tools are rooted), set only when the effective engine is `xrunner`.
 - Existing behavior without `env_dir` is unchanged; the full suite (221 tests) stays green.
 - Commit after every task with explicit `git add` paths. Repos: xcodon-runtime on `main`; opencodon on branch `xcodon-engine`.
 
@@ -522,7 +522,7 @@ Repository: `/media/qhu/slim/Workspace/opencodon`, branch `xcodon-engine`.
 - Test: `tests/test_agents_integration.py`
 
 **Interfaces:**
-- Produces: `ToolsConfig.xrunner_env_project_relative: str | None = "workspace/.xrunner-env"`; `_xrunner_env_dir_env(tools, project_root) -> dict[str, str]`; `merge_coala_container_env_into_mcp_servers` sets `XRUNNER_ENV_DIR` on the coala-runtime server when the effective engine is `xrunner`.
+- Produces: `ToolsConfig.xrunner_env_project_relative: str | None = ".xrunner-env"`; `_xrunner_env_dir_env(tools, project_root) -> dict[str, str]`; `merge_coala_container_env_into_mcp_servers` sets `XRUNNER_ENV_DIR` on the coala-runtime server when the effective engine is `xrunner`.
 
 - [ ] **Step 1: Write the failing tests** (append to `tests/test_agents_integration.py`)
 
@@ -534,8 +534,8 @@ def test_merge_sets_xrunner_env_dir_when_engine_is_xrunner(tmp_path: Path) -> No
     tools = ToolsConfig(coala_runtime_container_engine="xrunner")
     srv = McpServerConfig(name="coala-runtime", command="coala-runtime", args=[])
     out = merge_coala_container_env_into_mcp_servers([srv], tools, project_root=tmp_path)
-    assert out[0].env["XRUNNER_ENV_DIR"] == str((tmp_path / "workspace" / ".xrunner-env").resolve())
-    assert (tmp_path / "workspace" / ".xrunner-env").is_dir()
+    assert out[0].env["XRUNNER_ENV_DIR"] == str((tmp_path / ".xrunner-env").resolve())
+    assert (tmp_path / ".xrunner-env").is_dir()
 
 
 def test_merge_no_xrunner_env_dir_for_docker_or_outside_root(tmp_path: Path) -> None:
@@ -558,7 +558,7 @@ def test_merge_no_xrunner_env_dir_for_docker_or_outside_root(tmp_path: Path) -> 
 `config.py`, next to `coala_runtime_tmpdir_project_relative`:
 
 ```python
-    xrunner_env_project_relative: str | None = Field(default="workspace/.xrunner-env")
+    xrunner_env_project_relative: str | None = Field(default=".xrunner-env")
     """Project-relative folder that holds the xrunner writable layer, passed to the **coala-runtime** MCP process as ``XRUNNER_ENV_DIR`` when the engine is ``xrunner``. Tools installed inside a container (pip, apt, R) persist there across calls and runs, keyed by image id. Set to ``null`` to disable."""
 ```
 

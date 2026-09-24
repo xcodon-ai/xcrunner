@@ -648,7 +648,10 @@ short lock.
   set on the MCP server process, every container the adapter creates uses
   that env folder. coala-runtime itself does not change.
 - opencodon: a tools field `xrunner_env_project_relative`, default
-  `workspace/.xrunner-env`, mirroring `coala_runtime_tmpdir_project_relative`.
+  `.xrunner-env` at the project root, mirroring
+  `coala_runtime_tmpdir_project_relative`. It stays out of `workspace/`
+  because the agent's file tools are rooted there and must not see the
+  writable layer.
   When the effective coala-runtime engine is `xrunner` and a project root is
   known, the path is resolved inside the project root and passed to the
   coala-runtime server as `XRUNNER_ENV_DIR`. A value that resolves outside
