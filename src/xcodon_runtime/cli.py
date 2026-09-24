@@ -157,7 +157,9 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
                 raise UsageError("--pull must be missing, always, or never")
             opts.pull = value
         elif flag == "--env-dir":
-            opts.env_dir = os.path.abspath(value)
+            if not value:
+                raise UsageError("--env-dir needs a directory, not an empty value")
+            opts.env_dir = os.path.abspath(os.path.expanduser(value))
         # -i / --interactive: stdin always passes through
     raise UsageError("no image given: usage: xrunner run [OPTIONS] IMAGE [COMMAND...]")
 

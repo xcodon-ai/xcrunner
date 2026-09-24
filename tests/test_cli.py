@@ -214,6 +214,18 @@ def test_parse_run_args_env_dir_is_absolutized(tmp_path, monkeypatch):
     assert cli.parse_run_args(["img"]).env_dir is None
 
 
+def test_parse_run_args_env_dir_rejects_empty():
+    for argv in (["--env-dir=", "img"], ["--env-dir", "", "img"]):
+        with pytest.raises(cli.UsageError, match="--env-dir"):
+            cli.parse_run_args(argv)
+
+
+def test_parse_run_args_env_dir_expands_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    opts = cli.parse_run_args(["--env-dir", "~/envs/py", "img"])
+    assert opts.env_dir == str(tmp_path / "envs" / "py")
+
+
 def test_cli_env_dir_persists_installs(home, busybox_image, engine_name, tmp_path, capfd):
     e = ["--engine", engine_name]
     env = tmp_path / "env"

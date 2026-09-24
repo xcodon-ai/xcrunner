@@ -73,6 +73,16 @@ class _CoalaContainer:
         return getattr(self.__dict__["container"], name)
 
 
+def _check_env_dir(value: str | None, source: str) -> str | None:
+    """Expand ``~`` and require an absolute path, so a bad value fails once, at construction."""
+    if value is None:
+        return None
+    path = os.path.expanduser(value)
+    if not os.path.isabs(path):
+        raise XcodonError(f"{source} must be an absolute path: {value}")
+    return path
+
+
 def _unwrap(container) -> Container:
     """Accept either a ``_CoalaContainer`` view or a raw ``Container``."""
     return getattr(container, "container", container)
@@ -89,7 +99,8 @@ class XcodonContainerManager:
     def __init__(self, home: Path | str | None = None, engine: str | None = None,
                  env_dir: str | None = None) -> None:
         self.runtime = Runtime(home, engine=engine)
-        self.env_dir = env_dir if env_dir is not None else (os.environ.get(ENV_DIR_VAR) or None)
+        self.env_dir = _check_env_dir(env_dir, "env_dir") if env_dir is not None else (
+            _check_env_dir(os.environ.get(ENV_DIR_VAR) or None, ENV_DIR_VAR))
         self.containers: Dict[str, Container] = {}
 
     async def ensure_image(self, image: str) -> None:

@@ -158,3 +158,16 @@ def test_env_dir_from_environment_persists_installs(home, busybox_image, engine_
 
     asyncio.run(flow())
     assert (env / busybox_image.id / ("upper" if engine_name == "ns" else "rootfs")).is_dir()
+
+
+def test_env_dir_is_validated_at_construction(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    mgr = XcodonContainerManager(home.path, env_dir="~/envs/a")
+    assert mgr.env_dir == str(tmp_path / "envs" / "a")
+    with pytest.raises(XcodonError, match="absolute"):
+        XcodonContainerManager(home.path, env_dir="relative/env")
+    monkeypatch.setenv("XRUNNER_ENV_DIR", "also/relative")
+    with pytest.raises(XcodonError, match="XRUNNER_ENV_DIR"):
+        XcodonContainerManager(home.path)
+    monkeypatch.setenv("XRUNNER_ENV_DIR", "")
+    assert XcodonContainerManager(home.path).env_dir is None
