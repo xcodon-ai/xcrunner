@@ -33,6 +33,7 @@ class Container:
     created: str
     name: str | None = None
     state: str = "created"
+    env_dir: str | None = None
     dir: Path = field(default=Path("."), compare=False, repr=False)
 
     @property
@@ -86,7 +87,7 @@ class ContainerStore:
         self.home = home
 
     def create(self, container_id: str, image: Image, image_ref: str, spec: ProcessSpec,
-               binds: list[Bind], engine: str, name: str | None) -> Container:
+               binds: list[Bind], engine: str, name: str | None, env_dir: str | None = None) -> Container:
         """Create a container directory and its config.
 
         The name-uniqueness check and the directory create (through the
@@ -107,7 +108,7 @@ class ContainerStore:
                 id=container_id, image_id=image.id, image_ref=image_ref, image_rootfs=str(image.rootfs),
                 engine=engine, argv=spec.argv, env=spec.env, workdir=spec.workdir, uid=spec.uid, gid=spec.gid,
                 binds=list(binds), created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                name=name, dir=cdir,
+                name=name, env_dir=env_dir, dir=cdir,
             )
             c.save()
         return c

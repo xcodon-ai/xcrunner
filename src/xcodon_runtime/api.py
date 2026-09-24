@@ -94,7 +94,8 @@ class Runtime:
 
     def create(self, ref: str, command: Sequence[str] | None = None, entrypoint: Sequence[str] | None = None,
                binds: Sequence[Bind] = (), workdir: str | None = None, env: Mapping[str, str] | None = None,
-               user: str | None = None, name: str | None = None, pull: str = "missing") -> Container:
+               user: str | None = None, name: str | None = None, pull: str = "missing",
+               env_dir: str | Path | None = None) -> Container:
         image = self.resolve_image(ref, pull)
         container_id = os.urandom(32).hex()
         spec = build_spec(image.config, image.rootfs, container_id, command=command, entrypoint=entrypoint,
@@ -102,8 +103,14 @@ class Runtime:
         for b in binds:
             if not os.path.isabs(b.source) or not os.path.isabs(b.target):
                 raise XcodonError(f"bind paths must be absolute: {b.source}:{b.target}")
+        env_dir_s: str | None = None
+        if env_dir is not None:
+            env_dir_s = str(env_dir)
+            if not os.path.isabs(env_dir_s):
+                raise XcodonError(f"env_dir must be an absolute path: {env_dir_s}")
+            Path(env_dir_s).mkdir(parents=True, exist_ok=True)
         engine = self.engine_choice().name
-        return self.store.create(container_id, image, ref, spec, list(binds), engine, name)
+        return self.store.create(container_id, image, ref, spec, list(binds), engine, name, env_dir=env_dir_s)
 
     def start(self, c: Container) -> None:
         self._engine(c).start(c)
@@ -192,7 +199,8 @@ class Runtime:
     def run(self, ref: str, command: Sequence[str] | None = None, entrypoint: Sequence[str] | None = None,
             binds: Sequence[Bind] = (), workdir: str | None = None, env: Mapping[str, str] | None = None,
             user: str | None = None, name: str | None = None, rm: bool = False, pull: str = "missing",
-            cidfile: str | None = None, stdin=None, stdout=None, stderr=None) -> int:
+            cidfile: str | None = None, stdin=None, stdout=None, stderr=None,
+            env_dir: str | Path | None = None) -> int:
         """Create, start, and wait for one container, forwarding SIGINT/SIGTERM to it.
 
         Signal forwarding only works when this is called from the main
@@ -203,7 +211,7 @@ class Runtime:
         When ``cidfile`` is given, the container id is written there right
         after creation, before it starts.
         """
-        c = self.create(ref, command, entrypoint, binds, workdir, env, user, name, pull)
+        c = self.create(ref, command, entrypoint, binds, workdir, env, user, name, pull, env_dir=env_dir)
         started = False
         try:
             if cidfile:

@@ -14,7 +14,9 @@ from pathlib import Path
 
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import Bind, container_lock
+from xcodon_runtime.envdir import prepare_env_layer
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
+from xcodon_runtime.home import RuntimeHome
 
 log = logging.getLogger(__name__)
 VENDORED_DIR = Path(__file__).resolve().parent / "_bin"
@@ -83,7 +85,7 @@ def _guest_to_host(rootfs: Path, binds: list[Bind], guest_path: str) -> Path:
     return rootfs / guest_path.lstrip("/")
 
 
-def _resolve_guest(container: Container, workdir: str, command: str, path_value: str) -> tuple[str | None, int]:
+def _resolve_guest(container: Container, rootfs: Path, workdir: str, command: str, path_value: str) -> tuple[str | None, int]:
     """Find command on the guest PATH, the way PRoot's own initial-command lookup would.
 
     Returns the resolved host path and 0, or None with the exit code to use:
@@ -94,7 +96,6 @@ def _resolve_guest(container: Container, workdir: str, command: str, path_value:
     mapped to a host path through the container's binds (see
     ``_guest_to_host``), mirroring ``nsexec._resolve``.
     """
-    rootfs = container.dir / "rootfs"
     if "/" in command:
         guest_candidates = [command if command.startswith("/") else _guest_join(workdir, command)]
     else:
@@ -118,6 +119,11 @@ class ProotEngine:
 
     name = "proot"
 
+    def rootfs_path(self, container: Container) -> Path:
+        if container.env_dir:
+            return prepare_env_layer(container) / "rootfs"
+        return container.dir / "rootfs"
+
     def start(self, container: Container) -> None:
         """Copy the rootfs once, then mark the container started.
 
@@ -133,18 +139,19 @@ class ProotEngine:
                     "no PRoot binary: set XCODON_PROOT to a static proot, put proot on PATH, "
                     "or use an x86_64 build with the vendored binary"
                 )
-            rootfs = container.dir / "rootfs"
+            rootfs = self.rootfs_path(container)
             if not rootfs.is_dir() or not any(rootfs.iterdir()):
-                log.info(
-                    "container %s: copying rootfs (full copy unless the filesystem supports reflinks)",
-                    container.short_id,
-                )
-                _copy_rootfs(Path(container.image_rootfs), rootfs)
+                home = RuntimeHome(container.dir.parent.parent)
+                with home.lock(f"envlayer-{container.image_id}"):
+                    if not rootfs.is_dir() or not any(rootfs.iterdir()):
+                        log.info("container %s: copying rootfs (full copy unless the filesystem supports reflinks)",
+                                 container.short_id)
+                        _copy_rootfs(Path(container.image_rootfs), rootfs)
             (container.dir / STARTED_MARKER).write_text(proot)
             (rootfs / container.workdir.lstrip("/")).mkdir(parents=True, exist_ok=True)
 
     def is_running(self, container: Container) -> bool:
-        rootfs = container.dir / "rootfs"
+        rootfs = self.rootfs_path(container)
         return (
             (container.dir / STARTED_MARKER).exists()
             and rootfs.is_dir()
@@ -158,10 +165,10 @@ class ProotEngine:
         proot = find_proot()
         if proot is None:
             raise EngineUnavailable("PRoot binary disappeared; set XCODON_PROOT")
-        rootfs = container.dir / "rootfs"
+        rootfs = self.rootfs_path(container)
         (rootfs / workdir.lstrip("/")).mkdir(parents=True, exist_ok=True)
         if argv:
-            _, code = _resolve_guest(container, workdir, argv[0], env.get("PATH", ""))
+            _, code = _resolve_guest(container, rootfs, workdir, argv[0], env.get("PATH", ""))
             if code != 0:
                 # PRoot cannot even start if its initial command is missing or
                 # not executable; report the container-engine convention (126

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import container_lock
+from xcodon_runtime.envdir import acquire_env_lock, prepare_env_layer
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
 from xcodon_runtime.keeper import KEEPER_LOG, KEEPER_PLAN
 
@@ -51,11 +52,19 @@ def _tail(path: Path, lines: int = 30) -> str:
 class NsEngine:
     name = "ns"
 
+    def layer_paths(self, container: Container) -> tuple[Path, Path]:
+        """Where this container's upper and work directories live."""
+        if container.env_dir:
+            layer = prepare_env_layer(container)
+            return layer / "upper", layer / "work"
+        return container.dir / "upper", container.dir / "work"
+
     def _plan(self, container: Container) -> dict:
+        upper, work = self.layer_paths(container)
         return {
             "lower": container.image_rootfs,
-            "upper": str(container.dir / "upper"),
-            "work": str(container.dir / "work"),
+            "upper": str(upper),
+            "work": str(work),
             "merged": str(container.dir / "merged"),
             "uid": container.uid,
             "gid": container.gid,
@@ -72,20 +81,27 @@ class NsEngine:
     def _start_locked(self, container: Container) -> None:
         if self.is_running(container):
             return
-        for d in ("upper", "work", "merged"):
-            (container.dir / d).mkdir(exist_ok=True)
+        upper, work = self.layer_paths(container)
+        for d in (upper, work, container.dir / "merged"):
+            d.mkdir(parents=True, exist_ok=True)
         plan_path = container.dir / KEEPER_PLAN
         plan_path.write_text(json.dumps(self._plan(container), indent=2))
         log_path = container.dir / KEEPER_LOG
 
+        lock_fd = acquire_env_lock(upper.parent, f"container {container.short_id}") if container.env_dir else None
         r, w = os.pipe()
-        with open(log_path, "ab") as logf:
-            proc = subprocess.Popen(
-                [*KEEPER_ARGV, str(plan_path), str(w)],
-                pass_fds=(w,), stdin=subprocess.DEVNULL, stdout=logf, stderr=logf,
-                start_new_session=True, close_fds=True,
-            )
-        os.close(w)
+        pass_fds = (w,) if lock_fd is None else (w, lock_fd)
+        try:
+            with open(log_path, "ab") as logf:
+                proc = subprocess.Popen(
+                    [*KEEPER_ARGV, str(plan_path), str(w)],
+                    pass_fds=pass_fds, stdin=subprocess.DEVNULL, stdout=logf, stderr=logf,
+                    start_new_session=True, close_fds=True,
+                )
+        finally:
+            os.close(w)
+            if lock_fd is not None:
+                os.close(lock_fd)  # the keeper's inherited copy keeps the flock
         buf = b""
         deadline = time.monotonic() + START_TIMEOUT
         try:
@@ -164,8 +180,9 @@ class NsEngine:
         The kernel makes it unreadable, so a later plain delete of the container
         directory would fail on it. It is gone once the overlay is unmounted.
         """
+        _, work = self.layer_paths(container)
         try:
-            (container.dir / "work" / "work").rmdir()
+            (work / "work").rmdir()
         except OSError:
             pass
 
