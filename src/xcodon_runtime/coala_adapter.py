@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
 
@@ -20,6 +21,8 @@ from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.keeper import KEEPER_LOG
 
 log = logging.getLogger(__name__)
+
+ENV_DIR_VAR = "XRUNNER_ENV_DIR"
 
 
 async def _call(fn, *args, **kwargs):
@@ -76,12 +79,17 @@ def _unwrap(container) -> Container:
 
 
 class XcodonContainerManager:
-    """Rootfs files are owned by the invoking user and the writable layer persists, so installs work."""
+    """Rootfs files are owned by the invoking user and the writable layer persists, so installs work.
+
+    Set XRUNNER_ENV_DIR to keep installs across coala-runtime's per-call containers.
+    """
 
     system_site_packages_writable: bool = True
 
-    def __init__(self, home: Path | str | None = None, engine: str | None = None) -> None:
+    def __init__(self, home: Path | str | None = None, engine: str | None = None,
+                 env_dir: str | None = None) -> None:
         self.runtime = Runtime(home, engine=engine)
+        self.env_dir = env_dir if env_dir is not None else (os.environ.get(ENV_DIR_VAR) or None)
         self.containers: Dict[str, Container] = {}
 
     async def ensure_image(self, image: str) -> None:
@@ -107,7 +115,7 @@ class XcodonContainerManager:
         argv = ["/bin/sh"] if command is None else (["/bin/sh", "-c", command] if isinstance(command, str) else list(command))
         c = await _call(
             self.runtime.create, image, command=argv, binds=binds, workdir=working_dir,
-            env=dict(environment or {}), name=name,
+            env=dict(environment or {}), name=name, env_dir=self.env_dir,
         )
         self.containers[c.id] = c
         log.info("created xcodon container %s for %s", c.short_id, image)

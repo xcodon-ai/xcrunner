@@ -136,3 +136,25 @@ def test_returned_container_reloads_and_reports_status(home, busybox_image, engi
         await mgr.remove_container(c2)  # never started; still removable via the view
 
     asyncio.run(flow())
+
+
+def test_env_dir_from_environment_persists_installs(home, busybox_image, engine_name, tmp_path, monkeypatch):
+    env = tmp_path / "xrunner-env"
+    monkeypatch.setenv("XRUNNER_ENV_DIR", str(env))
+    mgr = XcodonContainerManager(home.path, engine=engine_name)
+
+    async def flow():
+        c = await mgr.create_container("xcodon-test/busybox:latest")
+        await mgr.start_container(c)
+        code, _, _ = await mgr.exec_command(c, "mkdir -p /opt/tool && echo ok > /opt/tool/marker")
+        assert code == 0
+        await mgr.remove_container(c)
+        c2 = await mgr.create_container("xcodon-test/busybox:latest")
+        await mgr.start_container(c2)
+        code, out, _ = await mgr.exec_command(c2, "cat /opt/tool/marker")
+        assert (code, out) == (0, b"ok\n")
+        assert c2.container.env_dir == str(env)
+        await mgr.remove_container(c2)
+
+    asyncio.run(flow())
+    assert (env / busybox_image.id / ("upper" if engine_name == "ns" else "rootfs")).is_dir()
