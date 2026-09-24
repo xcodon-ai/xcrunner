@@ -42,7 +42,7 @@ coala-runtime through its `ContainerManager` interface.
 
 ## 2. Architecture
 
-One Python package, `xcodon_runtime`, with a console script `xcodon`. All state
+One Python package, `xcodon_runtime`, with a console script `xrunner`. All state
 lives under one directory, default `~/.xcodon/runtime`, overridable with
 `XCODON_RUNTIME_HOME`.
 
@@ -56,7 +56,7 @@ Five components. Each is a module with one job.
 | Spec builder | Merge image config with run options into argv, env, workdir, uid, gid. |
 | Interfaces | CLI, Python API, and a `ContainerManager` adapter for coala-runtime. |
 
-Data flow for `xcodon run IMAGE CMD`:
+Data flow for `xrunner run IMAGE CMD`:
 
 1. Image store resolves IMAGE, pulling if needed.
 2. Container store creates a container directory.
@@ -88,7 +88,7 @@ Lookup order for a name:
    succeeds.
 3. The registry.
 
-`--pull=always` skips step 1. `xcodon pull` runs steps 2 and 3.
+`--pull=always` skips step 1. `xrunner pull` runs steps 2 and 3.
 
 ### 3.2 Sources
 
@@ -179,7 +179,7 @@ result exists after acquiring it and skips the work when it does.
 
 ### 3.7 Inspect
 
-`xcodon inspect IMAGE` prints a JSON array with one object:
+`xrunner inspect IMAGE` prints a JSON array with one object:
 
 ```json
 [{"Id": "sha256:...", "RepoTags": ["..."], "Architecture": "amd64", "Os": "linux",
@@ -374,7 +374,7 @@ process that unshares user and mount namespaces:
    hardened kernels allow user namespaces but not this.
 
 Otherwise the proot engine is selected, and one log line at info level names
-the failed probe. `xcodon info` prints all probe results. A container records
+the failed probe. `xrunner info` prints all probe results. A container records
 its engine at create time and always uses it, so a running keeper is never
 orphaned by a changed decision.
 
@@ -388,22 +388,22 @@ flag. `--memory`, `--cpus`, `--cpu-shares`, `--gpus`, `--net`, `--network`,
 because cwltool or docker-py callers may pass them.
 
 ```
-xcodon pull [--platform P] IMAGE
-xcodon inspect IMAGE
-xcodon images
-xcodon rmi IMAGE
-xcodon run [--mount=type=bind,source=S,target=T[,readonly]] [-v|--volume S:T[:ro|:rw]]
+xrunner pull [--platform P] IMAGE
+xrunner inspect IMAGE
+xrunner images
+xrunner rmi IMAGE
+xrunner run [--mount=type=bind,source=S,target=T[,readonly]] [-v|--volume S:T[:ro|:rw]]
            [--workdir=D] [-w D] [--env=K=V] [-e K=V] [--entrypoint=E] [--user=U] [-u U]
            [--name=N] [--rm] [-i] [--pull=missing|always] IMAGE [CMD...]
-xcodon create  (same options as run, minus --rm and -i)  IMAGE [CMD...]
-xcodon start ID
-xcodon exec [--workdir=D] [--env=K=V] ID CMD...
-xcodon stop ID
-xcodon rm [-f] ID
-xcodon ps [-a]
-xcodon logs ID
-xcodon info
-xcodon prune
+xrunner create  (same options as run, minus --rm and -i)  IMAGE [CMD...]
+xrunner start ID
+xrunner exec [--workdir=D] [--env=K=V] ID CMD...
+xrunner stop ID
+xrunner rm [-f] ID
+xrunner ps [-a]
+xrunner logs ID
+xrunner info
+xrunner prune
 ```
 
 `--mount` values are parsed as CSV, matching what cwltool emits.
@@ -445,9 +445,9 @@ is an argparse layer over this API and holds no logic of its own.
 
 coala's `configure_container_runner` gains one branch. When
 `container_runner == "xcodon"`, it sets
-`runtime_context.user_space_docker_cmd` to the path of the `xcodon`
+`runtime_context.user_space_docker_cmd` to the path of the `xrunner`
 executable found on PATH or next to the running interpreter. cwltool then
-calls `xcodon inspect`, `xcodon pull`, and `xcodon run` with the flags listed
+calls `xrunner inspect`, `xrunner pull`, and `xrunner run` with the flags listed
 in 5.1. No other coala change is needed.
 
 ### 5.4 coala-runtime integration

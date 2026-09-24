@@ -16,8 +16,7 @@ zstd = ["zstandard>=0.21"]
 dev = ["pytest>=8", "ruff>=0.4"]
 
 [project.scripts]
-xcodon = "xcodon_runtime.cli:main"
-xcodon-runtime = "xcodon_runtime.cli:main"
+xrunner = "xcodon_runtime.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xcodon_runtime"]

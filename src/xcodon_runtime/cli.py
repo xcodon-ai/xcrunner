@@ -18,7 +18,7 @@ from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.keeper import KEEPER_LOG
 from xcodon_runtime.reference import parse_platform
 
-log = logging.getLogger("xcodon")
+log = logging.getLogger("xrunner")
 
 EXIT_RUNTIME_ERROR = 125
 
@@ -117,7 +117,7 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
         flag, has_eq, inline = tok.partition("=")
         table = RUN_FLAGS if flag in RUN_FLAGS else IGNORED_FLAGS if flag in IGNORED_FLAGS else None
         if table is None:
-            raise UsageError(f"unknown option {flag}; xcodon supports a docker subset (see xcodon run --help)")
+            raise UsageError(f"unknown option {flag}; xrunner supports a docker subset (see xrunner run --help)")
         takes_value = table[flag]
         value = None
         if takes_value:
@@ -156,10 +156,10 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
                 raise UsageError("--pull must be missing, always, or never")
             opts.pull = value
         # -i / --interactive: stdin always passes through
-    raise UsageError("no image given: usage: xcodon run [OPTIONS] IMAGE [COMMAND...]")
+    raise UsageError("no image given: usage: xrunner run [OPTIONS] IMAGE [COMMAND...]")
 
 
-RUN_USAGE = ("xcodon {cmd} [--mount=... | -v HOST:CONTAINER[:ro]] [-w DIR] [-e K=V] [--entrypoint E] "
+RUN_USAGE = ("xrunner {cmd} [--mount=... | -v HOST:CONTAINER[:ro]] [-w DIR] [-e K=V] [--entrypoint E] "
              "[-u USER] [--name N] [--rm] [-i] [--cidfile F] [--pull missing|always|never] IMAGE [COMMAND...]")
 
 _GLOBAL_OPTIONS_WITH_VALUE = {"--engine", "--home"}
@@ -301,7 +301,7 @@ def cmd_prune(rt: Runtime, args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="xcodon", description="Rootless container runtime for Docker images.")
+    p = argparse.ArgumentParser(prog="xrunner", description="Rootless container runtime for Docker images.")
     p.add_argument("--version", action="version", version=f"xcodon-runtime {__version__}")
     p.add_argument("-v", "--verbose", action="count", default=0, help="-v for info, -vv for debug")
     p.add_argument("--engine", choices=("ns", "proot"), help="force an engine (default: probe the host)")
@@ -373,7 +373,7 @@ def _configure_logging(verbosity: int) -> None:
         level = logging.DEBUG
     elif verbosity == 1 or env_level == "info":
         level = logging.INFO
-    logging.basicConfig(level=level, format="xcodon: %(levelname)s %(name)s: %(message)s", stream=sys.stderr,
+    logging.basicConfig(level=level, format="xrunner: %(levelname)s %(name)s: %(message)s", stream=sys.stderr,
                         force=True)
 
 
@@ -391,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         rt = Runtime(args.home, engine=args.engine)
         return args.func(rt, args)
     except XcodonError as e:
-        print(f"xcodon: {e}", file=sys.stderr)
+        print(f"xrunner: {e}", file=sys.stderr)
         return EXIT_RUNTIME_ERROR
     except KeyboardInterrupt:
         return 130

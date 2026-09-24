@@ -14,26 +14,24 @@ Two engines, chosen automatically:
 ## Install
 
     pip install xcodon-runtime            # or: uv pip install xcodon-runtime
-    xcodon info                            # shows the engine and probe results
+    xrunner info                            # shows the engine and probe results
 
 Optional: `pip install 'xcodon-runtime[zstd]'` for zstd-compressed layers.
 On aarch64 hosts without user namespaces, provide a PRoot binary with
-`XCODON_PROOT=/path/to/proot`. The command is also installed as
-`xcodon-runtime` for hosts where another program is already named `xcodon`.
-
+`XCODON_PROOT=/path/to/proot`. The command is `xrunner`; the package and its Python module keep the name xcodon-runtime.
 ## Use
 
-    xcodon pull python:3.12-slim
-    xcodon run --rm -v $PWD:/work -w /work python:3.12-slim python -c 'print("hi")'
-    xcodon create --name dev python:3.12-slim
-    xcodon start dev
-    xcodon exec dev pip install numpy      # persists in the container's writable layer
-    xcodon exec dev python -c 'import numpy'
-    xcodon stop dev && xcodon rm dev
-    xcodon logs dev                        # the ns engine's keeper log
-    xcodon rmi python:3.12-slim            # drop a tag, and the image with its last tag
-    xcodon prune                           # leftovers: half-built dirs and orphan blobs
-    xcodon prune --all                     # also unused layers and day-old exited containers
+    xrunner pull python:3.12-slim
+    xrunner run --rm -v $PWD:/work -w /work python:3.12-slim python -c 'print("hi")'
+    xrunner create --name dev python:3.12-slim
+    xrunner start dev
+    xrunner exec dev pip install numpy      # persists in the container's writable layer
+    xrunner exec dev python -c 'import numpy'
+    xrunner stop dev && xrunner rm dev
+    xrunner logs dev                        # the ns engine's keeper log
+    xrunner rmi python:3.12-slim            # drop a tag, and the image with its last tag
+    xrunner prune                           # leftovers: half-built dirs and orphan blobs
+    xrunner prune --all                     # also unused layers and day-old exited containers
 
 Two global flags come before the subcommand: `--engine ns|proot` forces an
 engine, and `--home DIR` picks the state directory for this one command.
@@ -67,10 +65,10 @@ In coala, add one branch to `configure_container_runner`:
 
 ```python
     if container_runner == "xcodon":
-        runtime_context.user_space_docker_cmd = shutil.which("xcodon") or "xcodon"
+        runtime_context.user_space_docker_cmd = shutil.which("xrunner") or "xrunner"
 ```
 
-cwltool then calls `xcodon inspect`, `xcodon pull`, and `xcodon run` with
+cwltool then calls `xrunner inspect`, `xrunner pull`, and `xrunner run` with
 docker-style flags.
 
 ## coala-runtime

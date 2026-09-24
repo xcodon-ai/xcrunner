@@ -54,17 +54,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         fds = [os.open(f"/proc/{pid}/ns/{ns}", os.O_RDONLY) for ns in NAMESPACES]
     except FileNotFoundError:
-        print("xcodon: container is not running", file=sys.stderr)
+        print("xrunner: container is not running", file=sys.stderr)
         return EXIT_NO_CONTAINER
     except OSError as e:
-        print(f"xcodon: cannot open the container namespaces: {e}", file=sys.stderr)
+        print(f"xrunner: cannot open the container namespaces: {e}", file=sys.stderr)
         return EXIT_NO_CONTAINER
     try:
         for fd in fds:
             sc.setns(fd, 0)
             os.close(fd)
     except OSError as e:
-        print(f"xcodon: cannot enter container: {e}", file=sys.stderr)
+        print(f"xrunner: cannot enter container: {e}", file=sys.stderr)
         return EXIT_NO_CONTAINER
 
     child = os.fork()
@@ -79,14 +79,14 @@ def main(argv: list[str] | None = None) -> int:
             exe, code = _resolve(command[0], env.get("PATH", ""))
             if exe is None:
                 why = "permission denied" if code == EXIT_CANNOT_EXEC else "not found"
-                print(f"xcodon: exec: {command[0]}: {why}", file=sys.stderr)
+                print(f"xrunner: exec: {command[0]}: {why}", file=sys.stderr)
                 os._exit(code)
             os.execve(exe, command, env)
         except PermissionError as e:
-            print(f"xcodon: exec: {command[0]}: {e.strerror}", file=sys.stderr)
+            print(f"xrunner: exec: {command[0]}: {e.strerror}", file=sys.stderr)
             os._exit(EXIT_CANNOT_EXEC)
         except OSError as e:
-            print(f"xcodon: exec: {command[0]}: {e}", file=sys.stderr)
+            print(f"xrunner: exec: {command[0]}: {e}", file=sys.stderr)
             os._exit(EXIT_CANNOT_EXEC)
 
     def forward(signum, frame):
