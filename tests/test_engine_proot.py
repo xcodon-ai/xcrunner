@@ -174,6 +174,7 @@ def test_copy_rootfs_failure_raises_engine_unavailable_and_cleans_up(home, busyb
     with pytest.raises(EngineUnavailable):
         e.start(c)
     assert not (c.dir / "rootfs").exists()
+    assert not (c.dir / "rootfs.tmp").exists()
 
 
 def test_find_proot_ignores_a_directory(monkeypatch, tmp_path):

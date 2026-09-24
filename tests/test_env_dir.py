@@ -231,3 +231,38 @@ def test_overlay_mount_error_names_the_three_paths():
     msg = str(e.value)
     assert "overlay mount failed" in msg
     assert "lower=/img/rootfs" in msg and "upper=/env/abc/upper" in msg and "work=/env/abc/work" in msg
+
+
+def test_proot_interrupted_copy_is_redone(rt, engine_name, tmp_path):
+    if engine_name != "proot":
+        pytest.skip("proot only")
+    env = tmp_path / "env"
+    c = rt.create("xcodon-test/busybox", env_dir=env)
+    layer = env_layer_dir(str(env), c.image_id)
+    (layer / "rootfs.tmp").mkdir(parents=True)
+    (layer / "rootfs.tmp" / "stray").write_text("half a copy\n")
+    rt.start(c)
+    try:
+        assert (layer / "rootfs" / "bin" / "busybox").exists()
+        assert not (layer / "rootfs" / "stray").exists()
+        assert not (layer / "rootfs.tmp").exists()
+    finally:
+        rt.stop(c)
+
+
+def test_read_paths_do_not_recreate_a_deleted_env_folder(rt, engine_name, tmp_path):
+    import shutil
+
+    env = tmp_path / "env"
+    c = rt.create("xcodon-test/busybox", env_dir=env)
+    rt.start(c)
+    rt.stop(c)
+    shutil.rmtree(env)
+    engine = rt._engine(c)
+    if engine_name == "proot":
+        from xcodon_runtime.engine_proot import STARTED_MARKER
+
+        (c.dir / STARTED_MARKER).write_text("stale marker")
+    assert not engine.is_running(c)
+    engine.stop(c)
+    assert not env.exists(), "read paths must not create the env folder"

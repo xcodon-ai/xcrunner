@@ -17,7 +17,7 @@ from pathlib import Path
 
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import container_lock
-from xcodon_runtime.envdir import ENV_LOCK_NAME, acquire_env_lock, prepare_env_layer
+from xcodon_runtime.envdir import ENV_LOCK_NAME, acquire_env_lock, env_layer_dir, prepare_env_layer
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
 from xcodon_runtime.keeper import KEEPER_LOG, KEEPER_PLAN
 
@@ -62,9 +62,9 @@ class NsEngine:
     name = "ns"
 
     def layer_paths(self, container: Container) -> tuple[Path, Path]:
-        """Where this container's upper and work directories live."""
+        """Where this container's upper and work directories live. A pure path: only ``start`` creates folders."""
         if container.env_dir:
-            layer = prepare_env_layer(container)
+            layer = env_layer_dir(container.env_dir, container.image_id)
             return layer / "upper", layer / "work"
         return container.dir / "upper", container.dir / "work"
 
@@ -90,6 +90,8 @@ class NsEngine:
     def _start_locked(self, container: Container) -> None:
         if self.is_running(container):
             return
+        if container.env_dir:
+            prepare_env_layer(container)
         upper, work = self.layer_paths(container)
         for d in (upper, work, container.dir / "merged"):
             d.mkdir(parents=True, exist_ok=True)

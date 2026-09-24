@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import platform
@@ -10,18 +11,19 @@ import shlex
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import Bind, container_lock
-from xcodon_runtime.envdir import prepare_env_layer
+from xcodon_runtime.envdir import env_layer_dir, prepare_env_layer
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
-from xcodon_runtime.home import RuntimeHome
 
 log = logging.getLogger(__name__)
 VENDORED_DIR = Path(__file__).resolve().parent / "_bin"
 STARTED_MARKER = "proot-started"
 HOST_BINDS = ("/dev", "/proc", "/sys", "/etc/resolv.conf", "/etc/hosts")
+COPY_LOCK_NAME = ".copy.lock"
 
 
 def find_proot() -> str | None:
@@ -39,21 +41,42 @@ def find_proot() -> str | None:
     return None
 
 
-def _copy_rootfs(src: Path, dst: Path) -> None:
-    dst.mkdir(parents=True, exist_ok=True)
+@contextmanager
+def _copy_lock(layer_dir: Path):
+    """An exclusive lock on a file inside the layer, so every runtime home sharing it is guarded."""
+    fd = os.open(layer_dir / COPY_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        r = subprocess.run(["cp", "-a", "--reflink=auto", f"{src}/.", str(dst)], capture_output=True, text=True)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _copy_rootfs(src: Path, dst: Path) -> None:
+    """Copy into ``<dst>.tmp`` and rename it to ``dst`` when done.
+
+    An interrupted copy then leaves only the ``.tmp`` directory, which the next
+    copy removes first, so a partial rootfs is never taken for a complete one.
+    """
+    tmp = dst.with_name(dst.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    if tmp.exists():
+        raise EngineUnavailable(f"could not remove the partial rootfs copy {tmp}; delete it by hand")
+    tmp.mkdir(parents=True)
+    try:
+        r = subprocess.run(["cp", "-a", "--reflink=auto", f"{src}/.", str(tmp)], capture_output=True, text=True)
     except OSError as e:
         log.info("cp is not available (%s); falling back to Python copy", e)
         r = subprocess.CompletedProcess(["cp"], 1, "", str(e))
     if r.returncode != 0:
         log.info("cp --reflink failed (%s); falling back to Python copy", r.stderr.strip())
-        shutil.rmtree(dst, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
         try:
-            shutil.copytree(src, dst, symlinks=True)
+            shutil.copytree(src, tmp, symlinks=True)
         except OSError as e:
-            shutil.rmtree(dst, ignore_errors=True)
+            shutil.rmtree(tmp, ignore_errors=True)
             raise EngineUnavailable(f"could not copy image rootfs for the proot engine: {e}") from e
+    os.rename(tmp, dst)
 
 
 EXIT_CANNOT_EXEC = 126
@@ -120,8 +143,9 @@ class ProotEngine:
     name = "proot"
 
     def rootfs_path(self, container: Container) -> Path:
+        """Where the copied rootfs lives. A pure path: only ``start`` creates folders."""
         if container.env_dir:
-            return prepare_env_layer(container) / "rootfs"
+            return env_layer_dir(container.env_dir, container.image_id) / "rootfs"
         return container.dir / "rootfs"
 
     def start(self, container: Container) -> None:
@@ -139,11 +163,12 @@ class ProotEngine:
                     "no PRoot binary: set XCODON_PROOT to a static proot, put proot on PATH, "
                     "or use an x86_64 build with the vendored binary"
                 )
+            if container.env_dir:
+                prepare_env_layer(container)
             rootfs = self.rootfs_path(container)
-            if not rootfs.is_dir() or not any(rootfs.iterdir()):
-                home = RuntimeHome(container.dir.parent.parent)
-                with home.lock(f"envlayer-{container.image_id}"):
-                    if not rootfs.is_dir() or not any(rootfs.iterdir()):
+            if not rootfs.is_dir():
+                with _copy_lock(rootfs.parent):
+                    if not rootfs.is_dir():
                         log.info("container %s: copying rootfs (full copy unless the filesystem supports reflinks)",
                                  container.short_id)
                         _copy_rootfs(Path(container.image_rootfs), rootfs)
@@ -152,11 +177,7 @@ class ProotEngine:
 
     def is_running(self, container: Container) -> bool:
         rootfs = self.rootfs_path(container)
-        return (
-            (container.dir / STARTED_MARKER).exists()
-            and rootfs.is_dir()
-            and any(rootfs.iterdir())
-        )
+        return (container.dir / STARTED_MARKER).exists() and rootfs.is_dir()
 
     def popen(self, container: Container, argv: list[str], env: dict[str, str], workdir: str,
               **popen_kwargs) -> subprocess.Popen:
