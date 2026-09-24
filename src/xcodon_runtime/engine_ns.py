@@ -50,6 +50,14 @@ def _tail(path: Path, lines: int = 30) -> str:
         return ""
 
 
+def _overlay_failure_hint(container: Container) -> str:
+    """What to tell the user when a keeper with an env folder fails before ready."""
+    if not container.env_dir:
+        return ""
+    return ("the env folder must be on a local filesystem that supports overlay upper layers "
+            "(not NFS or similar)")
+
+
 class NsEngine:
     name = "ns"
 
@@ -132,9 +140,11 @@ class NsEngine:
             proc.wait()
             if match:
                 _kill(int(match.group(1)), signal.SIGKILL)
+            hint = _overlay_failure_hint(container)
             raise EngineUnavailable(
                 f"ns keeper failed to start for container {container.short_id}. "
-                f"Keeper log:\n{_tail(log_path)}"
+                + (f"Note: {hint}. " if hint else "")
+                + f"Keeper log:\n{_tail(log_path)}"
             )
         try:
             proc.wait(timeout=KILL_TIMEOUT)

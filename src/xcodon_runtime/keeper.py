@@ -166,6 +166,22 @@ def _pause_forever() -> None:
         signal.pause()
 
 
+def _mount_overlay(plan: dict, mount=None) -> None:
+    """Mount the overlay on ``merged``. Runs before the pivot, so the error path may import.
+
+    A bare EINVAL says nothing about which directory the kernel refused, so the
+    error names all three.
+    """
+    mount = mount or sc.mount
+    lower, upper, work = plan["lower"], plan["upper"], plan["work"]
+    try:
+        mount("overlay", plan["merged"], "overlay", 0,
+              f"lowerdir={lower},upperdir={upper},workdir={work}")
+    except OSError as e:
+        raise OSError(e.errno, f"{e.strerror}: overlay mount failed "
+                               f"(lower={lower}, upper={upper}, work={work})") from e
+
+
 def _run(plan: dict, info_fd: int) -> None:
     host_uid, host_gid = os.getuid(), os.getgid()
     sc.unshare(sc.CLONE_NEWUSER | sc.CLONE_NEWNS)
@@ -174,8 +190,7 @@ def _run(plan: dict, info_fd: int) -> None:
 
     merged = plan["merged"]
     os.makedirs(merged, exist_ok=True)
-    sc.mount("overlay", merged, "overlay", 0,
-             f"lowerdir={plan['lower']},upperdir={plan['upper']},workdir={plan['work']}")
+    _mount_overlay(plan)
 
     sc.unshare(sc.CLONE_NEWPID | sc.CLONE_NEWUTS)
     pid = os.fork()

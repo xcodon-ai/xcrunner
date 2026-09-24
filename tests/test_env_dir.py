@@ -203,3 +203,31 @@ def test_env_lock_wait_names_the_holder(tmp_path, caplog):
     assert "container abc123def456 holds it" in waits[0].getMessage()
     assert "xrunner stop abc123def456" in waits[0].getMessage()
     assert (layer / ENV_HOLDER_NAME).read_text().strip() == "fedcba654321"
+
+
+def test_overlay_failure_hint_only_with_env_dir():
+    from types import SimpleNamespace
+
+    from xcodon_runtime.engine_ns import _overlay_failure_hint
+
+    hint = _overlay_failure_hint(SimpleNamespace(env_dir="/some/env"))
+    assert "local filesystem that supports overlay upper layers" in hint
+    assert "not NFS" in hint
+    assert _overlay_failure_hint(SimpleNamespace(env_dir=None)) == ""
+
+
+def test_overlay_mount_error_names_the_three_paths():
+    import errno
+
+    from xcodon_runtime import keeper
+
+    def failing_mount(*args):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    plan = {"lower": "/img/rootfs", "upper": "/env/abc/upper", "work": "/env/abc/work", "merged": "/c/merged"}
+    with pytest.raises(OSError) as e:
+        keeper._mount_overlay(plan, mount=failing_mount)
+    assert e.value.errno == errno.EINVAL
+    msg = str(e.value)
+    assert "overlay mount failed" in msg
+    assert "lower=/img/rootfs" in msg and "upper=/env/abc/upper" in msg and "work=/env/abc/work" in msg
