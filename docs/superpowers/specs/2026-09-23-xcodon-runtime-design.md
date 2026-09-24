@@ -586,3 +586,76 @@ unit tier plus `ns`, `proot`, and `network`.
 - **PRoot fallback over delegating to Apptainer.** Keeps the runtime
   self-contained and behaving the same on every host. Apptainer remains
   available in coala-runtime as its own engine.
+
+## 10. Persistent env folder
+
+Added 2026-09-24. Approved design for keeping tools installed inside a
+container.
+
+### 10.1 Problem
+
+coala-runtime creates a container per tool call and removes it afterwards.
+Anything the agent installs during a call, whether pip, apt, R packages, or
+conda, dies with that container. With Docker the agent works around this by
+baking dependency images, which needs the daemon. xrunner needs its own way
+to keep installations, and it must work on hosts without Docker.
+
+### 10.2 The env folder
+
+An env folder is a host directory that holds a container's writable layer.
+A container created with an env folder mounts its overlay upper layer from
+there instead of from its own container directory. The next container
+started from the same image with the same env folder sees everything the
+previous one installed.
+
+Layout:
+
+```
+<env-dir>/<image-id>/
+  image.json     image ref, image id, first-use time, engine
+  upper/ work/   the writable layer                      (ns engine)
+  rootfs/        the persistent rootfs copy              (proot engine)
+  .lock          held by the running container's keeper (ns engine)
+```
+
+The layer is keyed by image id. A rebuilt base image has a new id and gets
+a fresh layer, so a stale layer never sits on top of a changed image.
+Deleting `<env-dir>/<image-id>` resets that env. The container directory
+under the runtime home keeps `config.json`, `merged/`, `keeper.pid`, and
+`keeper.log`; `xrunner rm` removes only that directory and never the env
+folder.
+
+### 10.3 Concurrency
+
+Two overlay mounts may not share one upper directory. Starting an ns
+container with an env folder therefore takes an exclusive `flock` on
+`<env-dir>/<image-id>/.lock`. The starter acquires it and passes the open
+descriptor to the keeper, so the lock lives exactly as long as the container
+runs and survives the starting process exiting. A second start for the same
+image and env folder logs one line saying it is waiting and blocks until the
+first container stops. The proot engine has no kernel restriction; two proot
+containers may share a rootfs copy, and only the first copy is guarded by a
+short lock.
+
+### 10.4 Interfaces
+
+- CLI: `xrunner run --env-dir DIR ...` and `xrunner create --env-dir DIR ...`.
+  The flag is named to stay clear of `-e/--env`, which sets variables. The
+  path is made absolute.
+- Python: `Runtime.create(..., env_dir=None)` and `Runtime.run(..., env_dir=None)`.
+  The container record gains `env_dir: str | None`.
+- coala-runtime adapter: when the environment variable `XRUNNER_ENV_DIR` is
+  set on the MCP server process, every container the adapter creates uses
+  that env folder. coala-runtime itself does not change.
+- opencodon: a tools field `xrunner_env_project_relative`, default
+  `workspace/.xrunner-env`, mirroring `coala_runtime_tmpdir_project_relative`.
+  When the effective coala-runtime engine is `xrunner` and a project root is
+  known, the path is resolved inside the project root and passed to the
+  coala-runtime server as `XRUNNER_ENV_DIR`. A value that resolves outside
+  the project root is ignored with a warning. `coala_runtime_mcp_extra_env`
+  can override the variable.
+
+### 10.5 Out of scope
+
+Mounting host pixi or conda folders onto PATH, sharing one env folder across
+different images, exporting or importing an env, and pruning env folders.
