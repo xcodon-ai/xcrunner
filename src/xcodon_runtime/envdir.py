@@ -1,8 +1,9 @@
 """The persistent env folder: a host directory holding a container's writable layer.
 
 Layout is ``<env_dir>/<image_id>/`` with ``upper/`` and ``work/`` (ns engine)
-or ``rootfs/`` (proot engine), an ``image.json`` for humans, and a ``.lock``
-the running ns keeper holds so two overlays never share one upper directory.
+or ``rootfs/`` (proot engine), an ``image.json`` for humans, a ``.lock``
+the running ns keeper holds so two overlays never share one upper directory,
+and a ``holder`` file naming the container that took the lock last.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import fcntl
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,6 +23,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 ENV_LOCK_NAME = ".lock"
 ENV_INFO_NAME = "image.json"
+ENV_HOLDER_NAME = "holder"
+WAIT_LOG_EVERY = 60  # seconds between two "waiting for env layer" warnings
 
 
 def env_layer_dir(env_dir: str, image_id: str) -> Path:
@@ -51,19 +55,47 @@ def prepare_env_layer(container: "Container") -> Path:
                 "engine": container.engine,
                 "first_used": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }, indent=2))
+        log.info("new env layer for %s (%s) in %s",
+                 container.image_ref, container.image_id[:12], container.env_dir)
     return layer
 
 
-def acquire_env_lock(layer_dir: Path, what: str) -> int:
+def _read_holder(layer_dir: Path) -> str | None:
+    try:
+        return (layer_dir / ENV_HOLDER_NAME).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def acquire_env_lock(layer_dir: Path, holder: str) -> int:
     """Take the layer's exclusive lock and return the open descriptor that holds it.
 
     The caller passes the descriptor to the keeper, which inherits the lock and
-    holds it until it exits. If another container has the layer, log once and wait.
+    holds it until it exits. ``holder`` is the caller's container short id; it
+    is written to the ``holder`` file once the lock is taken. While another
+    container has the layer, warn every minute and keep waiting. There is no
+    timeout.
     """
     fd = os.open(layer_dir / ENV_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        log.info("%s: waiting for env layer %s (another container of this image is running)", what, layer_dir)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        waited = 0
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if waited % WAIT_LOG_EVERY == 0:
+                    other = _read_holder(layer_dir)
+                    if other:
+                        log.warning("waiting for env layer %s: container %s holds it (xrunner stop %s frees it)",
+                                    layer_dir, other, other)
+                    else:
+                        log.warning("waiting for env layer %s: another container holds it (xrunner stop frees it)",
+                                    layer_dir)
+                time.sleep(1)
+                waited += 1
+        (layer_dir / ENV_HOLDER_NAME).write_text(f"{holder}\n")
+    except BaseException:
+        os.close(fd)
+        raise
     return fd

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import container_lock
-from xcodon_runtime.envdir import acquire_env_lock, prepare_env_layer
+from xcodon_runtime.envdir import ENV_LOCK_NAME, acquire_env_lock, prepare_env_layer
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
 from xcodon_runtime.keeper import KEEPER_LOG, KEEPER_PLAN
 
@@ -88,16 +89,21 @@ class NsEngine:
         plan_path.write_text(json.dumps(self._plan(container), indent=2))
         log_path = container.dir / KEEPER_LOG
 
-        lock_fd = acquire_env_lock(upper.parent, f"container {container.short_id}") if container.env_dir else None
         r, w = os.pipe()
-        pass_fds = (w,) if lock_fd is None else (w, lock_fd)
+        lock_fd = None
         try:
+            if container.env_dir:
+                lock_fd = acquire_env_lock(upper.parent, container.short_id)
+            pass_fds = (w,) if lock_fd is None else (w, lock_fd)
             with open(log_path, "ab") as logf:
                 proc = subprocess.Popen(
                     [*KEEPER_ARGV, str(plan_path), str(w)],
                     pass_fds=pass_fds, stdin=subprocess.DEVNULL, stdout=logf, stderr=logf,
                     start_new_session=True, close_fds=True,
                 )
+        except BaseException:
+            os.close(r)
+            raise
         finally:
             os.close(w)
             if lock_fd is not None:
@@ -179,12 +185,30 @@ class NsEngine:
 
         The kernel makes it unreadable, so a later plain delete of the container
         directory would fail on it. It is gone once the overlay is unmounted.
+
+        With an env folder, a second start may be waiting on the layer lock. The
+        keeper drops that lock before it is fully gone, so the waiter can mount
+        a new overlay on the same ``work/`` first. The directory is removed only
+        while this call holds the lock; if the lock is busy, the new overlay
+        owns ``work/work`` and it stays.
         """
         _, work = self.layer_paths(container)
+        if not container.env_dir:
+            _rmdir_quietly(work / "work")
+            return
         try:
-            (work / "work").rmdir()
+            fd = os.open(work.parent / ENV_LOCK_NAME, os.O_RDWR)
         except OSError:
-            pass
+            return  # no lock file: no overlay ever used this layer
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            _rmdir_quietly(work / "work")
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     def stop(self, container: Container) -> None:
         with container_lock(container):
@@ -202,6 +226,13 @@ class NsEngine:
             log.info("container %s: keeper stopped", container.short_id)
         (container.dir / KEEPER_PID).unlink(missing_ok=True)
         self._clear_overlay_work(container)
+
+
+def _rmdir_quietly(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass
 
 
 def _kill(pid: int, sig: int) -> None:

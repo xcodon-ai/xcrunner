@@ -153,3 +153,53 @@ def test_env_dir_not_created_on_duplicate_name(rt, tmp_path):
     with pytest.raises(XcodonError):
         rt.create("xcodon-test/busybox", name="dup", env_dir=fresh)
     assert not fresh.exists(), "env_dir must not be created when the store.create fails"
+
+
+def test_clear_overlay_work_skips_while_the_layer_is_locked(rt, engine_name, tmp_path):
+    """A blocked second start may already own work/work, so the stopper must leave it alone."""
+    if engine_name != "ns":
+        pytest.skip("only the ns engine has an overlay work directory")
+    import fcntl
+
+    from xcodon_runtime.engine_ns import NsEngine
+
+    env = tmp_path / "env"
+    c = rt.create("xcodon-test/busybox", env_dir=env)
+    layer = env_layer_dir(str(env), c.image_id)
+    (layer / "work" / "work").mkdir(parents=True)
+    fd = os.open(layer / ENV_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        NsEngine()._clear_overlay_work(c)
+        assert (layer / "work" / "work").is_dir(), "work/work belongs to the lock holder"
+    finally:
+        os.close(fd)
+    NsEngine()._clear_overlay_work(c)
+    assert not (layer / "work" / "work").exists()
+
+
+def test_env_lock_wait_names_the_holder(tmp_path, caplog):
+    import fcntl
+    import logging
+
+    from xcodon_runtime.envdir import ENV_HOLDER_NAME, acquire_env_lock
+
+    layer = tmp_path / "layer"
+    layer.mkdir()
+    (layer / ENV_HOLDER_NAME).write_text("abc123def456\n")
+    held = os.open(layer / ENV_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(held, fcntl.LOCK_EX)
+    got: list[int] = []
+    caplog.set_level(logging.WARNING, logger="xcodon_runtime.envdir")
+    t = threading.Thread(target=lambda: got.append(acquire_env_lock(layer, "fedcba654321")), daemon=True)
+    t.start()
+    time.sleep(0.5)
+    os.close(held)
+    t.join(timeout=10)
+    assert got, "acquire_env_lock never returned"
+    os.close(got[0])
+    waits = [r for r in caplog.records if r.levelno == logging.WARNING and "waiting for env layer" in r.getMessage()]
+    assert len(waits) == 1
+    assert "container abc123def456 holds it" in waits[0].getMessage()
+    assert "xrunner stop abc123def456" in waits[0].getMessage()
+    assert (layer / ENV_HOLDER_NAME).read_text().strip() == "fedcba654321"
