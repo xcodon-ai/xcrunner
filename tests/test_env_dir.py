@@ -266,3 +266,86 @@ def test_read_paths_do_not_recreate_a_deleted_env_folder(rt, engine_name, tmp_pa
     assert not engine.is_running(c)
     engine.stop(c)
     assert not env.exists(), "read paths must not create the env folder"
+
+
+def test_keeper_failing_before_ready_releases_the_env_lock(rt, engine_name, tmp_path, monkeypatch):
+    if engine_name != "ns":
+        pytest.skip("only the ns engine locks the layer")
+    import sys
+
+    from xcodon_runtime import engine_ns
+    from xcodon_runtime.errors import EngineUnavailable
+
+    env = tmp_path / "env"
+    c1 = rt.create("xcodon-test/busybox", env_dir=env)
+    c2 = rt.create("xcodon-test/busybox", env_dir=env)
+    real_argv = engine_ns.KEEPER_ARGV
+    monkeypatch.setattr(engine_ns, "KEEPER_ARGV", [sys.executable, "-c", "raise SystemExit(1)"])
+    with pytest.raises(EngineUnavailable, match="not NFS"):
+        rt.start(c1)
+    monkeypatch.setattr(engine_ns, "KEEPER_ARGV", real_argv)
+
+    started = threading.Event()
+    err: list[BaseException] = []
+
+    def second():
+        try:
+            rt.start(c2)
+            started.set()
+        except BaseException as e:  # noqa: BLE001
+            err.append(e)
+
+    t = threading.Thread(target=second, daemon=True)
+    t.start()
+    t.join(timeout=10)
+    try:
+        assert not err, err
+        assert started.is_set(), "the failed keeper must not keep the env lock"
+        assert rt.exec(c2, ["/bin/true"]).code == 0
+    finally:
+        t.join(timeout=30)
+        rt.stop(c2)
+
+
+def test_env_is_reusable_after_the_keeper_is_killed(rt, engine_name, tmp_path):
+    if engine_name != "ns":
+        pytest.skip("ns only: the keeper holds the layer")
+    import signal
+
+    from xcodon_runtime.engine_ns import KEEPER_PID, process_start_time
+
+    env = tmp_path / "env"
+    c1 = rt.create("xcodon-test/busybox", env_dir=env)
+    c2 = rt.create("xcodon-test/busybox", env_dir=env)
+    rt.start(c1)
+    try:
+        assert rt.exec(c1, "echo before > /kept").code == 0
+        pid = json.loads((c1.dir / KEEPER_PID).read_text())["pid"]
+        os.kill(pid, signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while process_start_time(pid) is not None:
+            assert time.monotonic() < deadline, "the killed keeper never went away"
+            time.sleep(0.02)
+        rt.start(c2)
+        try:
+            assert rt.exec(c2, "echo after > /written").code == 0
+            assert rt.exec(c2, ["/bin/cat", "/written"]).stdout == b"after\n"
+            assert rt.exec(c2, ["/bin/cat", "/kept"]).stdout == b"before\n"
+        finally:
+            rt.stop(c2)
+    finally:
+        rt.stop(c1)
+
+
+def test_stop_leaves_a_layer_that_can_be_deleted(rt, engine_name, tmp_path):
+    import shutil
+
+    env = tmp_path / "env"
+    c = rt.create("xcodon-test/busybox", env_dir=env)
+    rt.start(c)
+    assert rt.exec(c, "echo x > /file").code == 0
+    rt.stop(c)
+    layer = env_layer_dir(str(env), c.image_id)
+    assert not (layer / "work" / "work").exists()
+    shutil.rmtree(layer)
+    assert not layer.exists()
