@@ -444,7 +444,7 @@ is an argparse layer over this API and holds no logic of its own.
 ### 5.3 coala integration
 
 coala's `configure_container_runner` gains one branch. When
-`container_runner == "xcodon"`, it sets
+`container_runner == "xrunner"`, it sets
 `runtime_context.user_space_docker_cmd` to the path of the `xrunner`
 executable found on PATH or next to the running interpreter. cwltool then
 calls `xrunner inspect`, `xrunner pull`, and `xrunner run` with the flags listed
@@ -463,11 +463,11 @@ coala-runtime, so it has no dependency on it.
 
 coala-runtime's change is small and lives in its own repo:
 
-- `ContainerEngine.XCODON = "xcodon"`.
+- `ContainerEngine.XRUNNER = "xrunner"`.
 - `make_container_manager` returns `XcodonContainerManager` for that value.
-- Autodetection tries xcodon after Docker and Podman and before Apptainer,
+- Autodetection tries xrunner after Docker and Podman and before Apptainer,
   when `xcodon_runtime` is importable.
-- The `--engine` choices list includes `xcodon`.
+- The `--engine` choices list includes `xrunner`.
 
 Locally built `coala-runtime-python:latest` images work because
 `ensure_image` pulls from the local daemon when they are not in the store.
@@ -555,7 +555,7 @@ Integration tests:
 - `cwltool`: run a CWL CommandLineTool with a DockerRequirement through
   `cwltool --user-space-docker-cmd xcodon`.
 - `coala_runtime`: run coala-runtime's Python executor with
-  `COALA_CONTAINER_ENGINE=xcodon`. Lives in the coala-runtime repo.
+  `COALA_CONTAINER_ENGINE=xrunner`. Lives in the coala-runtime repo.
 - Vendored binary manifest: sizes and SHA-256 match `MANIFEST`.
 
 CI: GitHub Actions on `ubuntu-latest`, which allows user namespaces, runs the

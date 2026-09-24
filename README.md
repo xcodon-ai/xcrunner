@@ -64,7 +64,7 @@ locally built images work without a registry.
 In coala, add one branch to `configure_container_runner`:
 
 ```python
-    if container_runner == "xcodon":
+    if container_runner == "xrunner":
         runtime_context.user_space_docker_cmd = shutil.which("xrunner") or "xrunner"
 ```
 
@@ -75,7 +75,7 @@ docker-style flags.
 
 xcodon-runtime ships `xcodon_runtime.coala_adapter.XcodonContainerManager`,
 which implements coala-runtime's `ContainerManager` interface. In
-coala-runtime, add `XCODON = "xcodon"` to `ContainerEngine`, return the
+coala-runtime, add `XRUNNER = "xrunner"` to `ContainerEngine`, return the
 adapter from `make_container_manager` for that value, and try it in
 autodetection after Docker and Podman and before Apptainer.
 
