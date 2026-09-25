@@ -201,6 +201,8 @@ def _split_argv(argv: list[str]) -> tuple[list[str], list[str] | None]:
             return argv, None
         if tok in ("run", "create"):
             return argv[: i + 1], argv[i + 1 :]
+        if tok == "conda":
+            return argv[: i + 1], argv[i + 1 :]
         return argv, None
     return argv, None
 
@@ -503,6 +505,12 @@ def cmd_docker(rt: Runtime, args) -> int:
     return main(translated, _runtime=rt)
 
 
+def cmd_conda(rt: Runtime, args) -> int:
+    from xcodon_runtime.condashim import conda_main
+
+    return conda_main(list(args.rest), rt.home)
+
+
 def cmd_shim(rt: Runtime, args) -> int:
     target_dir = Path(args.dir or os.path.dirname(sys.executable)).expanduser().resolve()
     shim_path = target_dir / SHIM_NAME
@@ -662,6 +670,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("docker", help="accept docker verbs (build, image inspect, run, ...)", add_help=False)
     s.set_defaults(func=cmd_docker, rest=[])
+
+    s = sub.add_parser("conda", help="conda's command line over a pinned micromamba (see `xrunner conda --help`)",
+                       add_help=False)
+    s.set_defaults(func=cmd_conda, rest=[])
 
     s = sub.add_parser("shim", help="install a docker command that forwards to xrunner")
     ssub = s.add_subparsers(dest="shim_cmd", required=True)
