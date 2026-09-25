@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -25,6 +26,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 CACHE_FILE = "build-cache.json"
 IGNORED = {"EXPOSE", "VOLUME", "HEALTHCHECK", "STOPSIGNAL", "MAINTAINER", "ONBUILD"}
+# Instructions whose arguments xrunner substitutes $VAR/${VAR} in before use.
+# RUN, CMD, ENTRYPOINT, and SHELL are deliberately excluded: docker never
+# substitutes there either, because the shell (or, for exec form, nothing)
+# resolves those references at run time, not at build time.
+EXPAND_INSTRUCTIONS = {"FROM", "COPY", "ADD", "ENV", "LABEL", "WORKDIR", "USER", "ARG"}
+KNOWN_INSTRUCTIONS = {"ARG", "FROM", "ENV", "LABEL", "WORKDIR", "USER", "CMD", "ENTRYPOINT", "RUN", "COPY", "ADD",
+                      "SHELL"} | IGNORED
 DEFAULT_SHELL = ["/bin/sh", "-c"]
 _VAR = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))")
 
@@ -41,7 +49,9 @@ def parse_dockerfile(text: str) -> list[Instruction]:
 
     Blank lines and full-line comments (a ``#`` as the first non-space
     character) are skipped outside of a continuation; a ``#`` elsewhere on a
-    line is kept as part of the instruction's arguments, matching docker.
+    line is kept as part of the instruction's arguments, matching docker. A
+    comment line in the middle of a continuation is dropped without ending
+    the instruction, also matching docker.
     """
     out: list[Instruction] = []
     buf: list[str] = []
@@ -49,6 +59,8 @@ def parse_dockerfile(text: str) -> list[Instruction]:
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.rstrip()
         if not buf and (not line.strip() or line.lstrip().startswith("#")):
+            continue
+        if buf and line.lstrip().startswith("#"):
             continue
         if not buf:
             start = n
@@ -97,34 +109,50 @@ def parse_command(args: str, shell: list[str]) -> list[str]:
 def parse_env(args: str) -> dict[str, str]:
     """Parse ENV/LABEL arguments: one or more ``KEY=value`` pairs, or the legacy ``KEY value`` form."""
     s = args.strip()
+    if not s:
+        raise XcodonError("ENV/LABEL requires at least one KEY=value pair")
     if "=" not in s.split(None, 1)[0]:
         key, _, value = s.partition(" ")
         return {key: value.strip()}
     out: dict[str, str] = {}
-    for token in shlex.split(s):
+    try:
+        tokens = shlex.split(s)
+    except ValueError as e:
+        raise XcodonError(f"cannot parse ENV/LABEL arguments {s!r}: {e}") from e
+    for token in tokens:
         k, _, v = token.partition("=")
         out[k] = v
     return out
 
 
-def _parse_paths(args: str) -> list[str]:
-    s = args.strip()
-    if s.startswith("["):
-        parts = json.loads(s)
-        return [str(p) for p in parts]
-    tokens = shlex.split(s)
-    return [t for t in tokens if not t.startswith("--")]
-
-
 def _hash_tree(paths: Sequence[Path]) -> str:
+    """Hash a set of COPY/ADD sources: every entry's relative path, type, mode, and content.
+
+    Symlinks are never followed (a symlink to a directory is hashed as a
+    link, not descended into); empty directories are included so that adding
+    or removing one still changes the hash.
+    """
     h = hashlib.sha256()
+
+    def add(full: Path, rel: str) -> None:
+        st = full.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            h.update(f"L\0{rel}\0".encode())
+            h.update(os.readlink(full).encode())
+            h.update(b"\0")
+            return
+        mode = oct(stat.S_IMODE(st.st_mode)).encode()
+        if stat.S_ISDIR(st.st_mode):
+            h.update(b"D\0" + rel.encode() + b"\0" + mode + b"\0")
+            for entry in sorted(os.scandir(full), key=lambda e: e.name):
+                add(Path(entry.path), f"{rel}/{entry.name}" if rel else entry.name)
+        else:
+            h.update(b"F\0" + rel.encode() + b"\0" + mode + b"\0")
+            h.update(full.read_bytes())
+            h.update(b"\0")
+
     for p in sorted(paths):
-        for root, dirs, files in os.walk(p) if p.is_dir() else [(str(p.parent), [], [p.name])]:
-            dirs.sort()
-            for name in sorted(files):
-                full = Path(root) / name
-                h.update(str(full.relative_to(p.parent)).encode())
-                h.update(full.read_bytes() if full.is_file() else os.readlink(full).encode())
+        add(p, p.name)
     return h.hexdigest()
 
 
@@ -156,6 +184,26 @@ class Builder:
             tmp.write_text(json.dumps(data, indent=2))
             os.replace(tmp, self.cache_path)
 
+    # -- variable scope ------------------------------------------------------
+
+    def _scope(self, image: Image, args: Mapping[str, str]) -> dict[str, str]:
+        """ARGs in scope plus the image's current Env, with Env winning on a name clash."""
+        scope: dict[str, str] = dict(args)
+        for item in image.config.get("config", {}).get("Env") or []:
+            k, _, v = item.partition("=")
+            scope[k] = v
+        return scope
+
+    def _dequote(self, text: str) -> str:
+        try:
+            parts = shlex.split(text)
+        except ValueError as e:
+            raise XcodonError(f"cannot parse value {text!r}: {e}") from e
+        return " ".join(parts)
+
+    def _arg_value(self, raw: str, scope: Mapping[str, str]) -> str:
+        return expand_args(self._dequote(raw), scope)
+
     # -- build -------------------------------------------------------------------
 
     def build(self, dockerfile_text: str, tags: Sequence[str] = (), build_args: Mapping[str, str] | None = None,
@@ -163,58 +211,147 @@ class Builder:
         instructions = parse_dockerfile(dockerfile_text)
         if not instructions:
             raise XcodonError("Dockerfile has no instructions")
+        for ins in instructions:
+            if ins.name not in KNOWN_INSTRUCTIONS:
+                raise XcodonError(f"line {ins.line}: unsupported Dockerfile instruction {ins.name}")
+
         overrides = dict(build_args or {})
+        # ARGs declared before the first FROM: usable only to expand the FROM
+        # line itself. None means "declared, no default, not overridden".
+        global_defaults: dict[str, str | None] = {}
         args: dict[str, str] = {}
         shell = list(DEFAULT_SHELL)
         image: Image | None = None
+
         for n, ins in enumerate(instructions, 1):
             self.out(f"Step {n}/{len(instructions)} : {ins.name} {ins.args}")
+
             if ins.name == "ARG":
-                name, has_default, default = ins.args.partition("=")
+                name, has_default, default_raw = ins.args.partition("=")
                 name = name.strip()
-                args[name] = overrides.get(name, args.get(name, expand_args(default, args) if has_default else ""))
+                if not name:
+                    raise XcodonError(f"line {ins.line}: ARG requires a name")
+                if image is None:
+                    if name in overrides:
+                        global_defaults[name] = overrides[name]
+                    elif has_default:
+                        scope = {k: v for k, v in global_defaults.items() if v is not None}
+                        global_defaults[name] = self._arg_value(default_raw, scope)
+                    else:
+                        global_defaults.setdefault(name, None)
+                else:
+                    if name in overrides:
+                        args[name] = overrides[name]
+                    elif has_default:
+                        args[name] = self._arg_value(default_raw, self._scope(image, args))
+                    elif global_defaults.get(name) is not None:
+                        args[name] = global_defaults[name]
+                    else:
+                        args.pop(name, None)
                 continue
+
             if ins.name == "FROM":
-                ref = expand_args(ins.args, args).split()
-                if len(ref) > 1:
+                if image is not None:
+                    raise XcodonError(f"line {ins.line}: multi-stage builds (a second FROM) are not supported")
+                from_scope = {k: v for k, v in global_defaults.items() if v is not None}
+                tokens = expand_args(ins.args, from_scope).split()
+                while tokens and tokens[0].startswith("--"):
+                    flag = tokens.pop(0)
+                    if flag.startswith("--platform"):
+                        self.out(f" ---> {flag} is ignored by xrunner")
+                        log.warning("Dockerfile line %d: %s is ignored by xrunner", ins.line, flag)
+                    else:
+                        raise XcodonError(f"line {ins.line}: unsupported FROM flag {flag!r}")
+                if not tokens:
+                    raise XcodonError(f"line {ins.line}: FROM requires an image reference")
+                if len(tokens) > 1:
                     raise XcodonError(f"line {ins.line}: multi-stage builds (FROM ... AS name) are not supported")
-                image = self.rt.resolve_image(ref[0])
+                image = self.rt.resolve_image(tokens[0])
+                args = {}
+                shell = list(image.config.get("config", {}).get("Shell") or DEFAULT_SHELL)
                 self.out(f" ---> {image.short_id}")
                 continue
+
             if image is None:
                 raise XcodonError(f"line {ins.line}: FROM must come before {ins.name}")
+
             if ins.name in IGNORED:
                 self.out(f" ---> {ins.name} is ignored by xrunner")
                 log.warning("Dockerfile line %d: %s is ignored by xrunner", ins.line, ins.name)
                 continue
-            if ins.name == "SHELL":
-                shell = parse_command(ins.args, shell)
-                continue
-            expanded = expand_args(ins.args, args)
+
             content_hash = ""
             sources: list[Path] = []
+            dest = ""
             if ins.name in ("COPY", "ADD"):
-                sources = self._resolve_sources(_parse_paths(expanded)[:-1], ins)
+                expanded = expand_args(ins.args, self._scope(image, args))
+                paths = self._parse_copy_args(expanded, ins)
+                if len(paths) < 2:
+                    raise XcodonError(f"line {ins.line}: {ins.name} requires at least one source and a destination")
+                sources = self._resolve_sources(paths[:-1], ins)
+                dest = paths[-1]
                 content_hash = _hash_tree(sources)
+            elif ins.name in EXPAND_INSTRUCTIONS:  # ENV, LABEL, WORKDIR, USER
+                expanded = expand_args(ins.args, self._scope(image, args))
+            else:  # RUN, CMD, ENTRYPOINT, SHELL: used verbatim, the shell resolves its own vars
+                expanded = ins.args
+                if ins.name == "RUN":
+                    content_hash = ",".join(f"{k}={v}" for k, v in sorted(args.items()))
+
             key = hashlib.sha256(f"{image.id}|{ins.name}|{expanded}|{content_hash}".encode()).hexdigest()
-            cached = None if no_cache else self._cache_get(key)
-            if cached and self.rt.images.get(cached) is not None:
-                image = self.rt.images.get(cached)
+            cached_image = None
+            if not no_cache:
+                cached_id = self._cache_get(key)
+                if cached_id:
+                    cached_image = self.rt.images.get(cached_id)
+            if cached_image is not None:
+                image = cached_image
                 self.out(f" ---> CACHED {image.short_id}")
                 continue
+
             if ins.name == "RUN":
                 image = self._run_step(image, parse_command(expanded, shell), args, expanded)
             elif ins.name in ("COPY", "ADD"):
-                image = self._copy_step(image, sources, _parse_paths(expanded)[-1], expanded)
+                image = self._copy_step(image, sources, dest, expanded, ins)
             else:
-                image = self._config_step(image, ins.name, expanded, ins)
+                image, shell = self._config_step(image, ins.name, expanded, ins, shell)
             self.out(f" ---> {image.short_id}")
             self._cache_put(key, image.id)
+
         assert image is not None
         for t in tags:
             image = self.rt.images.tag(image.id, t)
         self.out(f"Successfully built {image.short_id}")
         return image
+
+    # -- COPY / ADD ----------------------------------------------------------
+
+    def _parse_copy_args(self, expanded: str, ins: Instruction) -> list[str]:
+        s = expanded.strip()
+        if s.startswith("["):
+            try:
+                parts = json.loads(s)
+            except json.JSONDecodeError as e:
+                raise XcodonError(f"line {ins.line}: bad exec-form path list {s!r}: {e}") from e
+            if not isinstance(parts, list) or not all(isinstance(p, str) for p in parts):
+                raise XcodonError(f"line {ins.line}: {ins.name} path list must be a JSON array of strings: {s!r}")
+            return parts
+        try:
+            tokens = shlex.split(s)
+        except ValueError as e:
+            raise XcodonError(f"line {ins.line}: cannot parse {ins.name} arguments {s!r}: {e}") from e
+        paths: list[str] = []
+        for t in tokens:
+            if t.startswith("--from"):
+                raise XcodonError(f"line {ins.line}: multi-stage builds ({ins.name} --from) are not supported")
+            if t.startswith("--chown") or t.startswith("--chmod"):
+                self.out(f" ---> {ins.name} {t} is ignored by xrunner")
+                log.warning("Dockerfile line %d: %s %s is ignored by xrunner", ins.line, ins.name, t)
+                continue
+            if t.startswith("--"):
+                raise XcodonError(f"line {ins.line}: unsupported {ins.name} flag {t!r}")
+            paths.append(t)
+        return paths
 
     def _resolve_sources(self, patterns: list[str], ins: Instruction) -> list[Path]:
         out: list[Path] = []
@@ -231,11 +368,117 @@ class Builder:
                 out.append(p)
         return out
 
+    def _src_mode(self, src: Path) -> int:
+        return stat.S_IMODE(os.lstat(src).st_mode)
+
+    def _materialize_dir(self, layer: Path, rel: str, image: Image, leaf_fallback_mode: int = 0o755) -> Path:
+        """mkdir -p ``rel`` under ``layer``.
+
+        Every directory created along the way takes the mode of the same
+        path in ``image.rootfs`` when that path exists there as a directory;
+        otherwise the final component gets ``leaf_fallback_mode`` and any
+        earlier scaffolding parent gets 0o755. This keeps a COPY or WORKDIR
+        layer from silently changing the mode of a directory (like /tmp)
+        that already exists in the image, since applying a layer's directory
+        entry always overwrites the target's mode.
+        """
+        cur = layer
+        rootfs_cur = image.rootfs
+        parts = [p for p in rel.split("/") if p not in ("", ".")]
+        for i, part in enumerate(parts):
+            cur = cur / part
+            rootfs_cur = rootfs_cur / part
+            if not cur.exists():
+                mode = leaf_fallback_mode if i == len(parts) - 1 else 0o755
+                try:
+                    st = rootfs_cur.lstat()
+                    if stat.S_ISDIR(st.st_mode):
+                        mode = stat.S_IMODE(st.st_mode)
+                except OSError:
+                    pass
+                cur.mkdir()
+                os.chmod(cur, mode)
+        return cur
+
+    def _copy_tree_into(self, src: Path, target: Path, image: Image, dest_rel: str) -> None:
+        """Copy the contents of a source directory into an already-materialized target directory.
+
+        A nested subdirectory takes the mode of the same path in
+        ``image.rootfs`` when it exists there, else its own mode in ``src``.
+        """
+        for entry in sorted(os.scandir(src), key=lambda e: e.name):
+            child_rel = f"{dest_rel}/{entry.name}" if dest_rel else entry.name
+            child_target = target / entry.name
+            if entry.is_symlink():
+                os.symlink(os.readlink(entry.path), child_target)
+            elif entry.is_dir(follow_symlinks=False):
+                mode = stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode)
+                rootfs_path = image.rootfs / child_rel
+                try:
+                    st = rootfs_path.lstat()
+                    if stat.S_ISDIR(st.st_mode):
+                        mode = stat.S_IMODE(st.st_mode)
+                except OSError:
+                    pass
+                child_target.mkdir()
+                os.chmod(child_target, mode)
+                self._copy_tree_into(Path(entry.path), child_target, image, child_rel)
+            else:
+                shutil.copy2(entry.path, child_target, follow_symlinks=False)
+
+    def _copy_step(self, image: Image, sources: list[Path], dest: str, text: str, ins: Instruction) -> Image:
+        workdir = image.config.get("config", {}).get("WorkingDir") or "/"
+        dest_abs = dest if dest.startswith("/") else os.path.join(workdir, dest)
+        dest_rel = dest_abs.lstrip("/")
+        dest_dir_form = dest == "." or dest.endswith("/") or dest.endswith("/.")
+        dest_exists_as_dir = (image.rootfs / dest_rel).is_dir()
+        dest_looks_like_dir = dest_dir_form or dest_exists_as_dir
+        if len(sources) > 1 and not dest_looks_like_dir:
+            raise XcodonError(
+                f"line {ins.line}: when using {ins.name} with more than one source file, "
+                "the destination must be a directory and end with a /"
+            )
+        dest_is_dir = dest_looks_like_dir or len(sources) > 1
+        work = Path(tempfile.mkdtemp(prefix="copy-", dir=self.rt.home.path))
+        try:
+            layer = work / "layer"
+            layer.mkdir()
+            for src in sources:
+                if src.is_dir():
+                    # A directory source always copies its contents, never nested
+                    # under its own name, regardless of the destination's form.
+                    target_dir = self._materialize_dir(layer, dest_rel, image, self._src_mode(src))
+                    self._copy_tree_into(src, target_dir, image, dest_rel)
+                elif dest_is_dir:
+                    target_dir = self._materialize_dir(layer, dest_rel, image)
+                    target = target_dir / src.name
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    shutil.copy2(src, target, follow_symlinks=False)
+                else:
+                    parent_rel = os.path.dirname(dest_rel)
+                    if parent_rel:
+                        self._materialize_dir(layer, parent_rel, image)
+                    target = layer / dest_rel
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    shutil.copy2(src, target, follow_symlinks=False)
+            return self.rt.images.commit(image, layer, created_by=f"{ins.name} {text}")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    # -- RUN -------------------------------------------------------------------
+
     def _run_step(self, image: Image, argv: list[str], args: Mapping[str, str], text: str) -> Image:
+        # An ARG is only exposed as a RUN environment variable when no ENV of
+        # the same name already won that name for the image: ENV always wins.
+        env_keys = {item.partition("=")[0] for item in (image.config.get("config", {}).get("Env") or [])}
+        run_env = {k: v for k, v in args.items() if k not in env_keys}
         c = self.rt.create(image.id, command=argv)
         try:
             self.rt.start(c)
-            p = self.rt.popen(c, argv, env=dict(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            p = self.rt.popen(c, argv, env=run_env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             assert p.stdout is not None
             for raw in p.stdout:
                 self.out(raw.decode(errors="replace").rstrip("\n"))
@@ -250,65 +493,48 @@ class Builder:
             except XcodonError:
                 pass
 
-    def _copy_step(self, image: Image, sources: list[Path], dest: str, text: str) -> Image:
-        workdir = image.config.get("config", {}).get("WorkingDir") or "/"
-        dest_abs = dest if dest.startswith("/") else os.path.join(workdir, dest)
-        into_dir = dest.endswith("/") or len(sources) > 1 or dest_abs.endswith(".")
-        work = Path(tempfile.mkdtemp(prefix="copy-", dir=self.rt.home.path))
-        try:
-            layer = work / "layer"
-            for src in sources:
-                target = layer / dest_abs.lstrip("/")
-                if into_dir or src.is_dir() and target.exists():
-                    target = target / src.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if src.is_dir():
-                    shutil.copytree(src, target, symlinks=True, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(src, target, follow_symlinks=False)
-            return self.rt.images.commit(image, layer, created_by=f"COPY {text}")
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
+    # -- ENV / LABEL / WORKDIR / USER / CMD / ENTRYPOINT / SHELL ----------------
 
-    def _config_step(self, image: Image, name: str, args: str, ins: Instruction) -> Image:
+    def _config_step(self, image: Image, name: str, text: str, ins: Instruction,
+                      shell: list[str]) -> tuple[Image, list[str]]:
         if name == "ENV":
-            changes = {"Env": [f"{k}={v}" for k, v in parse_env(args).items()]}
+            changes = {"Env": [f"{k}={v}" for k, v in parse_env(text).items()]}
         elif name == "LABEL":
-            changes = {"Labels": parse_env(args)}
+            changes = {"Labels": parse_env(text)}
         elif name == "WORKDIR":
             base = image.config.get("config", {}).get("WorkingDir") or "/"
-            path = args if args.startswith("/") else os.path.join(base, args)
-            changes = {"WorkingDir": path}
-            return self._workdir_step(image, path, changes, args)
+            path = text if text.startswith("/") else os.path.join(base, text)
+            return self._workdir_step(image, path, text), shell
         elif name == "USER":
-            changes = {"User": args}
+            changes = {"User": text}
         elif name in ("CMD", "ENTRYPOINT"):
-            changes = {"Cmd" if name == "CMD" else "Entrypoint": parse_command(args, DEFAULT_SHELL)}
+            changes = {"Cmd" if name == "CMD" else "Entrypoint": parse_command(text, shell)}
+        elif name == "SHELL":
+            new_shell = parse_command(text, shell)
+            image = self.rt.images.commit(image, None, changes={"Shell": list(new_shell)},
+                                           created_by=f"SHELL {text}")
+            return image, new_shell
         else:
-            raise XcodonError(f"unsupported Dockerfile instruction {name} at line {ins.line}")
-        return self.rt.images.commit(image, None, changes=changes, created_by=f"{name} {args}")
+            raise XcodonError(f"line {ins.line}: unsupported Dockerfile instruction {name}")
+        return self.rt.images.commit(image, None, changes=changes, created_by=f"{name} {text}"), shell
 
-    def _workdir_step(self, image: Image, path: str, changes: dict, args: str) -> Image:
+    def _workdir_step(self, image: Image, path: str, text: str) -> Image:
         """WORKDIR creates the directory in the image when the base rootfs lacks it.
 
         Matches docker: if the path does not exist in the base image, the
         commit carries a layer with just that empty directory (and its
-        parents); otherwise this is a config-only commit like the other
-        metadata instructions.
+        parents, each preserving any pre-existing mode); otherwise this is a
+        config-only commit like the other metadata instructions.
         """
+        changes = {"WorkingDir": path}
         target = image.rootfs / path.lstrip("/")
         if target.exists():
-            return self.rt.images.commit(image, None, changes=changes, created_by=f"WORKDIR {args}")
+            return self.rt.images.commit(image, None, changes=changes, created_by=f"WORKDIR {text}")
         work = Path(tempfile.mkdtemp(prefix="workdir-", dir=self.rt.home.path))
         try:
             layer = work / "layer"
             layer.mkdir()
-            layer_target = layer / path.lstrip("/")
-            layer_target.mkdir(parents=True, exist_ok=True)
-            for d in [layer_target, *layer_target.parents]:
-                if d == layer:
-                    break
-                os.chmod(d, 0o755)
-            return self.rt.images.commit(image, layer, changes=changes, created_by=f"WORKDIR {args}")
+            self._materialize_dir(layer, path.lstrip("/"), image)
+            return self.rt.images.commit(image, layer, changes=changes, created_by=f"WORKDIR {text}")
         finally:
             shutil.rmtree(work, ignore_errors=True)

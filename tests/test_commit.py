@@ -15,6 +15,12 @@ def test_apply_config_changes_merges_env_and_labels():
     assert cfg["config"]["WorkingDir"] == "/w" and cfg["config"]["Cmd"] == ["sh"]
 
 
+def test_apply_config_changes_replaces_shell():
+    cfg = {"config": {"Shell": ["/bin/sh", "-c"]}}
+    apply_config_changes(cfg, {"Shell": ["/bin/bash", "-c"]})
+    assert cfg["config"]["Shell"] == ["/bin/bash", "-c"]
+
+
 def test_store_commit_layer_and_config(home, busybox_image, tmp_path):
     st = ImageStore(home, sources=[])
     layer = tmp_path / "layer"

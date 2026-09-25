@@ -37,7 +37,7 @@ def apply_config_changes(config: dict, changes: dict) -> None:
             cfg["Env"] = [f"{k}={v}" for k, v in merged.items()]
         elif key == "Labels":
             cfg["Labels"] = {**(cfg.get("Labels") or {}), **value}
-        elif key in ("Cmd", "Entrypoint", "WorkingDir", "User"):
+        elif key in ("Cmd", "Entrypoint", "WorkingDir", "User", "Shell"):
             cfg[key] = value
         else:
             raise XcodonError(f"unsupported config change {key!r}")
