@@ -1,0 +1,62 @@
+"""The agent's real recipe: FROM the stock coala-runtime image, RUN pip install, reuse by tag via the docker shim."""
+
+import os
+import subprocess
+
+import pytest
+
+from xcodon_runtime import cli
+from xcodon_runtime.api import Runtime
+
+# Needs the stock image from the local daemon, and pip needs PyPI, so both markers apply.
+pytestmark = [pytest.mark.docker, pytest.mark.network]
+
+
+def test_agent_recipe_builds_and_runs_without_docker_commands(home, engine_name, tmp_path, monkeypatch):
+    tag = "xcodon/e2e-python-deps:latest"
+
+    # No stale tag on the real docker daemon before we start, so a leftover from a
+    # previous run (or a bug that shells out to real docker) cannot make this pass.
+    pre = subprocess.run(["/usr/bin/docker", "image", "inspect", tag], capture_output=True)
+    assert pre.returncode != 0
+
+    rt = Runtime(home.path, engine=engine_name)
+    rt.pull("coala-runtime-python:latest")
+    ctx = tmp_path / "built-python-deps"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM coala-runtime-python:latest\nRUN pip install --no-cache-dir tabulate\n")
+
+    shim_dir = tmp_path / "shimbin"
+    empty_path_dir = tmp_path / "empty-path"
+    empty_path_dir.mkdir()
+    # An empty PATH during install: this host has a real docker at /usr/bin/docker,
+    # and shim install refuses to run alongside a real docker on PATH without --force.
+    monkeypatch.setenv("PATH", str(empty_path_dir))
+    assert cli.main(["shim", "install", "--dir", str(shim_dir)]) == 0
+
+    # The shim comes first on PATH, so `docker` resolves to it. xrunner's own daemon
+    # source skips shims when resolving the real docker for the Dockerfile's FROM image,
+    # so it still finds /usr/bin/docker for that lookup.
+    env = {**os.environ, "PATH": f"{shim_dir}:/usr/bin:/bin", "XCODON_RUNTIME_HOME": str(home.path),
+           "XCODON_ENGINE": engine_name}
+
+    r = subprocess.run(["docker", "build", "-t", tag, str(ctx)], env=env, capture_output=True, text=True,
+                        timeout=1200)
+    build_text = r.stdout[-2000:] + r.stderr[-2000:]
+    assert r.returncode == 0, build_text
+
+    r = subprocess.run(["docker", "image", "inspect", tag], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+
+    out = tmp_path / "out"
+    with open(out, "wb") as f:
+        run_rc = rt.run(tag, command=["python", "-c", "import tabulate; print(tabulate.__version__)"],
+                         rm=True, stdout=f)
+    with open(out, "rb") as f:
+        run_text = f.read()
+    assert run_rc == 0, build_text + run_text.decode(errors="replace")[-2000:]
+    assert run_text.strip()
+
+    # The real docker daemon never received the tag: the whole build ran inside xrunner.
+    post = subprocess.run(["/usr/bin/docker", "image", "inspect", tag], capture_output=True)
+    assert post.returncode != 0
