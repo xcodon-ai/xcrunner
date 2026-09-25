@@ -276,6 +276,16 @@ def test_env_help_returns_micromambas_exit_code(home, project, fake):
                       err=io.StringIO()) == 5
 
 
+def test_env_help_uses_the_isolated_micromamba_environment(home, project, fake):
+    """`env --help` still needs a resolved, ensured root and the same isolated HOME/
+    MAMBA_ROOT_PREFIX as every other micromamba call, not the caller's raw environ."""
+    root = project / ".xrunner-env" / "conda"
+    assert conda_main(["env", "--help"], home, cwd=project, environ=_env(fake), err=io.StringIO()) == 0
+    call = read_log(fake[1])[0]
+    assert call["env"]["MAMBA_ROOT_PREFIX"] == str(root)
+    assert call["env"]["HOME"] == str(root / ".home")
+
+
 def test_config_list_passes_through(home, project, fake):
     root = project / ".xrunner-env" / "conda"
     assert conda_main(["config", "list"], home, cwd=project, environ=_env(fake), err=io.StringIO()) == 0
@@ -310,13 +320,29 @@ def test_env_create_from_file_uses_the_files_name(home, project, fake, tmp_path)
     assert err.getvalue() == ""
 
 
-def test_env_create_from_file_uses_the_files_prefix(home, project, fake, tmp_path):
-    target = tmp_path / "myprefix"
+def test_env_create_from_file_with_name_and_prefix_uses_the_name(home, project, fake, tmp_path):
+    """`conda env export` writes both `name:` and `prefix:` by default; micromamba
+    2.9.0's `env create -f FILE` (and so the shim) only honors `name:`."""
+    root = project / ".xrunner-env" / "conda"
+    ignored_prefix = tmp_path / "ignored-prefix"
     envfile = tmp_path / "env2.yml"
-    envfile.write_text(f"prefix: {target}  # a comment\ndependencies: []\n")
+    envfile.write_text(f"name: fromyml\nprefix: {ignored_prefix}\ndependencies: []\n")
     err = io.StringIO()
     assert conda_main(["env", "create", "-f", str(envfile)], home, cwd=project, environ=_env(fake), err=err) == 0
-    assert (target / "conda-explicit.txt").read_text().startswith("@EXPLICIT")
+    assert (root / "envs" / "fromyml" / "conda-explicit.txt").read_text().startswith("@EXPLICIT")
+    assert not ignored_prefix.exists()
+    assert err.getvalue() == ""
+
+
+def test_env_create_from_file_with_only_prefix_fails(home, project, fake, tmp_path):
+    """Real micromamba 2.9.0 never reads a file's `prefix:`; with no name anywhere
+    (file, -n, or -p) it exits 1, "No target prefix specified", and nothing is recorded."""
+    target = tmp_path / "onlyprefix"
+    envfile = tmp_path / "env3.yml"
+    envfile.write_text(f"prefix: {target}\ndependencies: []\n")
+    err = io.StringIO()
+    assert conda_main(["env", "create", "-f", str(envfile)], home, cwd=project, environ=_env(fake), err=err) == 1
+    assert not target.exists()
     assert err.getvalue() == ""
 
 

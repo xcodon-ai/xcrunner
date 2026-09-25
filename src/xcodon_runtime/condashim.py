@@ -150,27 +150,23 @@ def micromamba_argv(mm: Path, p: Parsed, root: Path) -> list[str]:
     return argv
 
 
-def _env_file_target(path: str, cwd: Path) -> tuple[str | None, str | None]:
-    """The top-level `name:`/`prefix:` of an `env create -f FILE` environment file: a
-    line starting at column 0 with `name:` or `prefix:`, its value stripped of quotes
-    and a trailing `#` comment. No YAML dependency; good enough to find where the
-    env landed so a record can be written after it."""
+def _env_file_name(path: str, cwd: Path) -> str | None:
+    """The top-level `name:` of an `env create -f FILE` environment file: a line
+    starting at column 0 with `name:`, its value stripped of quotes and a trailing `#`
+    comment. No YAML dependency; matches micromamba 2.9.0, which for `env create -f`
+    reads only the file's `name:` -- a `prefix:` line (which `conda env export` also
+    writes) is ignored, and with neither a name nor -n/-p it exits 1, "No target
+    prefix specified"."""
     file_path = Path(path)
     file_path = file_path if file_path.is_absolute() else cwd / file_path
     try:
         text = file_path.read_text()
     except OSError:
-        return None, None
-    name = prefix = None
+        return None
     for line in text.splitlines():
-        for key in ("name:", "prefix:"):
-            if line.startswith(key):
-                value = line[len(key):].split("#", 1)[0].strip().strip("'\"")
-                if key == "name:":
-                    name = value
-                else:
-                    prefix = value
-    return name, prefix
+        if line.startswith("name:"):
+            return line[len("name:"):].split("#", 1)[0].strip().strip("'\"")
+    return None
 
 
 def target_prefix(p: Parsed, root: Path, cwd: Path) -> Path:
@@ -180,10 +176,7 @@ def target_prefix(p: Parsed, root: Path, cwd: Path) -> Path:
     if p.name and p.name != "base":
         return root / "envs" / p.name
     if p.key == "env create" and p.file:
-        name, prefix = _env_file_target(p.file, cwd)
-        if prefix:
-            pp = Path(prefix)
-            return pp if pp.is_absolute() else cwd / pp
+        name = _env_file_name(p.file, cwd)
         if name and name != "base":
             return root / "envs" / name
     return root
@@ -228,9 +221,15 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
         return 1
     if p.verb == "env" and p.sub is None and p.help:
         # `conda env --help`/`-h`: no subcommand to validate against ENV_SUBVERBS, just
-        # micromamba's own help for the `env` verb.
+        # micromamba's own help for the `env` verb -- but it still needs a root and the
+        # same isolated environment as every other micromamba call.
         mm = find_micromamba(home, environ)
-        return subprocess.run([str(mm), "env"] + p.tokens, env=environ, cwd=cwd).returncode
+        root = resolve_root(cwd, environ, home, p.root_flag)
+        ensure_root(root.path)
+        if root.source == "home":
+            print(f"xrunner: no project env folder found; using {root.path}", file=err)
+        env = micromamba_env(root.path, home, environ)
+        return subprocess.run([str(mm), "env"] + p.tokens, env=env, cwd=cwd).returncode
     if p.verb not in PASS_VERBS or (p.verb == "env" and p.sub not in ENV_SUBVERBS):
         print(f"conda: '{p.key}' is not supported by xrunner's conda.\n{USAGE}", end="", file=err)
         return 2
