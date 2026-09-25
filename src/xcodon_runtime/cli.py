@@ -517,6 +517,9 @@ def cmd_shim(rt: Runtime, args) -> int:
     xrunner = os.path.join(os.path.dirname(sys.executable), "xrunner")
     if not os.access(xrunner, os.X_OK):
         xrunner = shutil.which("xrunner") or "xrunner"
+    if shim_path.is_dir() and not shim_path.is_symlink():
+        # os.replace cannot put a file over a directory, even with --force.
+        raise UsageError(f"{shim_path} is a directory; remove it first")
     target_dir.mkdir(parents=True, exist_ok=True)
     script = f"#!/bin/sh\n{SHIM_MARKER}\nexec {shlex.quote(xrunner)} docker \"$@\"\n"
     # Write to a temp file in the same directory, then `os.replace` it onto the final

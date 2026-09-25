@@ -194,6 +194,22 @@ def test_shim_install_refuses_existing_non_shim_file_even_when_dir_is_off_path(t
     assert cli.SHIM_MARKER in user_script.read_text()
 
 
+def test_shim_install_force_onto_a_directory_is_a_clean_error(tmp_path, monkeypatch, capsys):
+    empty = tmp_path / "empty-path3"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    d3 = tmp_path / "d3"
+    (d3 / "docker").mkdir(parents=True)
+    (d3 / "docker" / "keep").write_text("k")
+
+    assert cli.main(["shim", "install", "--dir", str(d3), "--force"]) == 125
+    err = capsys.readouterr().err
+    assert f"{d3 / 'docker'} is a directory; remove it first" in err
+    assert "Traceback" not in err and "IsADirectoryError" not in err
+    assert (d3 / "docker" / "keep").read_text() == "k"
+    assert sorted(p.name for p in d3.iterdir()) == ["docker"], "no temp file left behind"
+
+
 def test_shim_install_refuses_real_docker_hidden_behind_a_stale_shim_on_path(tmp_path, monkeypatch):
     """PATH is shim1:realbin, and shim1/docker is itself an old xrunner shim. The
     resolver must keep walking PATH past it and find the real docker in realbin."""
