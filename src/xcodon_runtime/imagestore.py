@@ -240,9 +240,16 @@ class ImageStore:
             self.home.write_refs(refs)
 
     def tag(self, ref_or_id: str, new_ref: str) -> Image:
-        img = self.require(ref_or_id)
-        self._set_ref(new_ref, img.id)
-        return self._load(img.id)
+        """Point ``new_ref`` at the image ``ref_or_id`` resolves to.
+
+        Holds ``store`` shared around the lookup and the ref write, so a
+        concurrent ``prune(all=True)`` (which takes ``store`` exclusive)
+        cannot delete the image as untagged in between.
+        """
+        with self.home.lock("store", shared=True):
+            img = self.require(ref_or_id)
+            self._set_ref(new_ref, img.id)
+            return self._load(img.id)
 
     def untagged(self) -> list[Image]:
         return [i for i in self.images() if not i.refs]
@@ -294,7 +301,7 @@ class ImageStore:
             }
         ]
 
-    def prune(self, all: bool = False) -> list[Path]:
+    def prune(self, all: bool = False, keep: set[str] = frozenset()) -> list[Path]:
         """Remove leftovers and orphan blobs. With ``all``, unreferenced layers too.
 
         Holds ``store`` exclusive (a writer), so it waits out any pull that
@@ -305,6 +312,9 @@ class ImageStore:
         Because no pull can be in flight here, every blob that is not a
         half-written ``*.part`` is left over from a pull that died after its
         download and before its import, so all of them are removed.
+
+        ``keep`` is a set of image ids that must survive the untagged sweep
+        even without a ref, e.g. images that a container still uses.
         """
         with self.home.lock("store"):
             removed = self.home.prune_leftovers()
@@ -314,9 +324,12 @@ class ImageStore:
                     removed.append(blob)
             if all:
                 for img in self.untagged():
+                    if img.id in keep:
+                        continue
                     with self.home.lock(f"image-{img.id}"):
                         shutil.rmtree(img.dir, ignore_errors=True)
-                    removed.append(img.dir)
+                    if not img.dir.exists():
+                        removed.append(img.dir)
                 used: set[str] = set()
                 for img in self.images():
                     manifest = json.loads((img.dir / "manifest.json").read_text())

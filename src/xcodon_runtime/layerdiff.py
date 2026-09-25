@@ -5,6 +5,14 @@ character device 0:0 and a replaced directory with an ``overlay.opaque``
 attribute. OCI layers record the same facts as ``.wh.<name>`` files and a
 ``.wh..wh..opq`` file. The proot engine has no upper directory, so its layer
 is the difference between the rootfs copy and the image rootfs.
+
+``snapshot_upper`` and ``snapshot_diff`` always copy regular files: their
+source (a live overlay upper directory or a running proot rootfs copy) stays
+writable, so hardlinking into it would let a later write against that source
+mutate an already-committed layer in place. ``link_tree`` keeps the
+hardlink-first behavior: its source is a throwaway snapshot directory about
+to be discarded, so sharing inodes there is harmless and it is how the store
+moves that snapshot into ``layers/<hex>`` cheaply on the same filesystem.
 """
 
 from __future__ import annotations
@@ -56,7 +64,11 @@ def _strip_overlay_xattrs(path: Path) -> None:
 
 
 def _place_file(src: Path, dst: Path) -> None:
-    """Hardlink a regular file into the layer, copying when linking is not possible."""
+    """Hardlink a regular file into the layer, copying when linking is not possible.
+
+    Used only by ``link_tree``, whose source is a throwaway snapshot about to
+    be discarded, so a shared inode there is harmless.
+    """
     try:
         os.link(src, dst)
     except OSError as e:
@@ -65,6 +77,17 @@ def _place_file(src: Path, dst: Path) -> None:
             _strip_overlay_xattrs(dst)
         else:
             raise
+
+
+def _copy_file(src: Path, dst: Path) -> None:
+    """Copy a regular file into the layer, never sharing inodes with a writable source.
+
+    Used by ``snapshot_upper`` and ``snapshot_diff``: their source stays live
+    and writable after the snapshot, so hardlinking would let a later write
+    mutate an already-committed layer.
+    """
+    shutil.copy2(src, dst, follow_symlinks=False)
+    _strip_overlay_xattrs(dst)
 
 
 def link_tree(src: Path, dst: Path) -> None:
@@ -80,6 +103,27 @@ def link_tree(src: Path, dst: Path) -> None:
             link_tree(Path(entry.path), target)
         elif entry.is_file(follow_symlinks=False):
             _place_file(Path(entry.path), target)
+    os.chmod(dst, mode)
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    """Like ``link_tree``, but always copies regular files (see ``_copy_file``).
+
+    Used by ``snapshot_diff`` for a directory that is entirely new relative to
+    the base: ``src`` is a live, writable rootfs, so hardlinking it in would
+    let a later write mutate the already-committed layer.
+    """
+    mode = stat.S_IMODE(os.lstat(src).st_mode)
+    dst.mkdir(parents=True, exist_ok=True)
+    os.chmod(dst, 0o700)  # writable while populating; the true mode is restored below
+    for entry in sorted(os.scandir(src), key=lambda e: e.name):
+        target = dst / entry.name
+        if entry.is_symlink():
+            os.symlink(os.readlink(entry.path), target)
+        elif entry.is_dir(follow_symlinks=False):
+            _copy_tree(Path(entry.path), target)
+        elif entry.is_file(follow_symlinks=False):
+            _copy_file(Path(entry.path), target)
     os.chmod(dst, mode)
 
 
@@ -108,7 +152,7 @@ def snapshot_upper(upper: Path, dest: Path) -> int:
             (dest / (WHITEOUT_PREFIX + entry.name)).touch()
             count += 1
         elif stat.S_ISREG(st.st_mode):
-            _place_file(src, target)
+            _copy_file(src, target)
             count += 1
         # sockets, fifos, other devices: skipped
     return count
@@ -149,7 +193,7 @@ def snapshot_diff(rootfs: Path, base_rootfs: Path, dest: Path) -> int:
                 count += 1
                 sb = None
             if sb is None:
-                link_tree(cur, target)
+                _copy_tree(cur, target)
                 count += 1
                 continue
             sub = snapshot_diff(cur, base, target)
@@ -169,7 +213,7 @@ def snapshot_diff(rootfs: Path, base_rootfs: Path, dest: Path) -> int:
             os.symlink(os.readlink(cur), target)
             count += 1
         elif stat.S_ISREG(sc.st_mode):
-            _place_file(cur, target)
+            _copy_file(cur, target)
             count += 1
     return count
 

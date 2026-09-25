@@ -7,7 +7,6 @@ import fcntl
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -18,7 +17,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from xcodon_runtime import __version__
-from xcodon_runtime.containers import Container, ContainerStore
+from xcodon_runtime.containers import Container, ContainerStore, _rmtree_tolerant
 from xcodon_runtime.daemon import DaemonSource
 from xcodon_runtime.engine import Bind, Engine, EngineChoice, get_engine, select_engine
 from xcodon_runtime.engine_proot import find_proot
@@ -41,6 +40,26 @@ class ExecResult:
     code: int
     stdout: bytes
     stderr: bytes
+
+
+def _lock_env_layer(env_root: Path) -> int | None:
+    """Take the exclusive lock on a shared env layer for the duration of a snapshot.
+
+    Returns an open, locked file descriptor the caller must close once the
+    snapshot is done (closing releases the lock), or ``None`` when the layer
+    has no lock file yet: nothing has ever locked it, which is normal for the
+    proot engine (only the ns engine's keeper takes this lock).
+    """
+    lock_path = env_root / ENV_LOCK_NAME
+    if not lock_path.exists():
+        return None
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise XcodonError(f"env layer {env_root} is in use by a running container") from None
+    return fd
 
 
 def _argv(command: str | Sequence[str] | None, default: list[str]) -> list[str]:
@@ -104,7 +123,7 @@ class Runtime:
         """True when a daemon-sourced tag now points at a different image in the daemon."""
         try:
             manifest = json.loads((img.dir / "manifest.json").read_text())
-        except OSError:
+        except (OSError, ValueError):
             return False
         if manifest.get("source") != "daemon":
             return False
@@ -113,8 +132,10 @@ class Runtime:
         except XcodonError:
             return False
         daemon = next((s for s in self.images.sources if isinstance(s, DaemonSource)), None)
-        if daemon is None or not daemon.available() or not daemon.has_image(reference):
+        if daemon is None or not daemon.available():
             return False
+        # ``image_id`` returning None already covers "no such tag in the
+        # daemon", so there is no need for a separate ``has_image`` call.
         current = daemon.image_id(reference)
         return bool(current) and current != f"sha256:{img.id}"
 
@@ -228,49 +249,50 @@ class Runtime:
                env_dir: str | Path | None = None, image: str | None = None,
                changes: dict | None = None, message: str = "") -> Image:
         """Snapshot a stopped container's layer, or an env folder layer, as a new image."""
-        if container is not None:
-            base = self.images.require(container.image_id)
-            if container.state == "running" and self._engine(container).is_running(container):
-                raise XcodonError(f"container {container.short_id} is running; stop it before commit")
-            if container.engine == "ns":
-                from xcodon_runtime.engine_ns import NsEngine
-                upper, _ = NsEngine().layer_paths(container)
-                source = ("upper", upper)
-            else:
-                from xcodon_runtime.engine_proot import ProotEngine
-                source = ("rootfs", ProotEngine().rootfs_path(container))
-            created_by = message or f"xrunner commit {container.short_id}"
-        elif env_dir is not None and image is not None:
-            base = self.images.require(image)
-            layer = env_layer_dir(str(env_dir), base.id)
-            if not layer.is_dir():
-                raise XcodonError(f"no env layer for image {base.short_id} under {env_dir}")
-            lock_path = layer / ENV_LOCK_NAME
-            if lock_path.exists():
-                fd = os.open(lock_path, os.O_RDWR)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    raise XcodonError(f"env layer {layer} is in use by a running container") from None
-                finally:
-                    os.close(fd)
-            source = ("upper", layer / "upper") if (layer / "upper").is_dir() else ("rootfs", layer / "rootfs")
-            created_by = message or f"xrunner commit --env-dir {env_dir}"
-        else:
-            raise XcodonError("commit needs a container, or --env-dir together with the base image")
-        kind, path = source
-        if not path.is_dir():
-            raise XcodonError(f"nothing to commit: {path} does not exist")
-        work = Path(tempfile.mkdtemp(prefix="commit-", dir=self.home.path))
+        if tag is not None:
+            parse_reference(tag)
+        env_lock_fd: int | None = None
         try:
-            layer_dir = work / "layer"
-            if kind == "upper":
-                snapshot_upper(path, layer_dir)
+            if container is not None:
+                base = self.images.require(container.image_id)
+                if container.state == "running" and self._engine(container).is_running(container):
+                    raise XcodonError(f"container {container.short_id} is running; stop it before commit")
+                if container.env_dir:
+                    env_lock_fd = _lock_env_layer(env_layer_dir(container.env_dir, container.image_id))
+                if container.engine == "ns":
+                    from xcodon_runtime.engine_ns import NsEngine
+                    upper, _ = NsEngine().layer_paths(container)
+                    source = ("upper", upper)
+                else:
+                    from xcodon_runtime.engine_proot import ProotEngine
+                    source = ("rootfs", ProotEngine().rootfs_path(container))
+                created_by = message or f"xrunner commit {container.short_id}"
+            elif env_dir is not None and image is not None:
+                base = self.images.require(image)
+                layer = env_layer_dir(str(env_dir), base.id)
+                if not layer.is_dir():
+                    raise XcodonError(f"no env layer for image {base.short_id} under {env_dir}")
+                env_lock_fd = _lock_env_layer(layer)
+                source = ("upper", layer / "upper") if (layer / "upper").is_dir() else ("rootfs", layer / "rootfs")
+                created_by = message or f"xrunner commit --env-dir {env_dir}"
             else:
-                snapshot_diff(path, base.rootfs, layer_dir)
-            return self.images.commit(base, layer_dir, changes=changes, ref=tag, created_by=created_by)
+                raise XcodonError("commit needs a container, or --env-dir together with the base image")
+            kind, path = source
+            if not path.is_dir():
+                raise XcodonError(f"nothing to commit: {path} does not exist")
+            work = Path(tempfile.mkdtemp(prefix="commit-", dir=self.home.path))
+            try:
+                layer_dir = work / "layer"
+                if kind == "upper":
+                    snapshot_upper(path, layer_dir)
+                else:
+                    snapshot_diff(path, base.rootfs, layer_dir)
+                return self.images.commit(base, layer_dir, changes=changes, ref=tag, created_by=created_by)
+            finally:
+                _rmtree_tolerant(work)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            if env_lock_fd is not None:
+                os.close(env_lock_fd)
 
     # -- run ---------------------------------------------------------------------
 
@@ -334,9 +356,12 @@ class Runtime:
 
         The container sweep lives here because the Runtime owns the
         ContainerStore: it removes exited containers created more than
-        ``CONTAINER_MAX_AGE`` ago.
+        ``CONTAINER_MAX_AGE`` ago. An untagged image that some existing
+        container still points at (``keep``) survives the untagged sweep
+        even though it has no ref.
         """
-        removed = self.images.prune(all)
+        keep = {c.image_id for c in self.store.list()}
+        removed = self.images.prune(all, keep=keep)
         if all:
             removed += self._prune_old_containers()
         return removed

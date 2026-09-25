@@ -32,7 +32,8 @@ def test_snapshot_upper_translates_opaque_dirs_and_copies_files(tmp_path):
     dest = tmp_path / "layer"
     n = snapshot_upper(upper, dest)
     assert (dest / "bin/added").read_text() == "m"
-    assert os.stat(dest / "bin/added").st_ino == os.stat(upper / "bin/added").st_ino
+    assert os.stat(dest / "bin/added").st_ino != os.stat(upper / "bin/added").st_ino, \
+        "snapshot_upper must copy, not hardlink: the upper dir stays live and writable"
     assert (dest / "replaced" / OPAQUE).exists()
     assert (dest / "replaced/new").read_text() == "n"
     assert os.readlink(dest / "lnk") == "/etc/hosts"
@@ -77,6 +78,21 @@ def test_snapshot_diff_finds_added_changed_and_deleted(tmp_path):
     assert os.readlink(dest / "newlink") == "keep"
     assert not (dest / "keep").exists()
     assert not (dest / "d/inner").exists()
+    assert os.stat(dest / "changed").st_ino != os.stat(cur / "changed").st_ino, \
+        "snapshot_diff must copy, not hardlink: the rootfs stays live and writable"
+
+
+def test_snapshot_diff_copies_new_directories_without_sharing_inodes(tmp_path):
+    """A directory absent from the base is copied wholesale (``_copy_tree``), not hardlinked in."""
+    base = mk(tmp_path / "base2", {"keep": "k"})
+    cur = mk(tmp_path / "cur2", {"keep": "k", "newdir/sub/f": "n"})
+    st = os.stat(base / "keep")
+    os.utime(cur / "keep", ns=(st.st_atime_ns, st.st_mtime_ns))
+    dest = tmp_path / "layer2"
+    snapshot_diff(cur, base, dest)
+    assert (dest / "newdir/sub/f").read_text() == "n"
+    assert os.stat(dest / "newdir/sub/f").st_ino != os.stat(cur / "newdir/sub/f").st_ino, \
+        "an entirely new directory must be copied, not hardlinked, from the live rootfs"
 
 
 def test_hash_layer_dir_is_deterministic_and_content_sensitive(tmp_path):
@@ -127,8 +143,15 @@ def test_snapshot_upper_preserves_restrictive_dir_mode(tmp_path):
         os.chmod(dest / "d", 0o750)
 
 
-def test_place_file_copy_fallback_strips_overlay_xattrs(tmp_path, monkeypatch):
-    """When os.link fails (e.g. EXDEV) and copy2 falls back, overlay bookkeeping must not leak."""
+def test_link_tree_copy_fallback_strips_overlay_xattrs(tmp_path, monkeypatch):
+    """When os.link fails (e.g. EXDEV) and copy2 falls back, overlay bookkeeping must not leak.
+
+    ``_place_file`` (the hardlink-first helper this fallback lives in) is now
+    only used by ``link_tree``, which is how the store moves a throwaway
+    snapshot into the layer store; ``snapshot_upper``/``snapshot_diff`` always
+    copy (see the inode-sharing tests above), so this exercises the fallback
+    through ``link_tree`` instead of calling the private helper directly.
+    """
     from xcodon_runtime import layerdiff
 
     src = mk(tmp_path / "src3", {"f": "x"})
@@ -142,8 +165,7 @@ def test_place_file_copy_fallback_strips_overlay_xattrs(tmp_path, monkeypatch):
         raise OSError(errno.EXDEV, "cross-device link")
 
     monkeypatch.setattr(layerdiff.os, "link", fake_link)
-    dst = tmp_path / "dst3" / "f"
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    layerdiff._place_file(target, dst)
-    assert dst.read_text() == "x"
-    assert not os.listxattr(dst), "overlay xattrs must not leak through the copy fallback"
+    dst_root = tmp_path / "dst3"
+    link_tree(src, dst_root)
+    assert (dst_root / "f").read_text() == "x"
+    assert not os.listxattr(dst_root / "f"), "overlay xattrs must not leak through the copy fallback"
