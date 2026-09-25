@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from xcodon_runtime import __version__
 from xcodon_runtime.containers import Container, ContainerStore, _rmtree_tolerant
@@ -383,6 +383,22 @@ class Runtime:
                 self.store.remove(c)
                 removed.append(c.dir)
         return removed
+
+    def build(self, context: str | Path, dockerfile: str | Path | None = None, tags: Sequence[str] = (),
+              build_args: Mapping[str, str] | None = None, no_cache: bool = False,
+              out: Callable[[str], None] | None = None) -> Image:
+        """Run a Dockerfile subset from a build context, one image commit per step. See build.Builder."""
+        from xcodon_runtime.build import Builder
+
+        context = Path(context)
+        if not context.is_dir():
+            raise XcodonError(f"build context {context} is not a directory")
+        df = Path(dockerfile) if dockerfile else context / "Dockerfile"
+        try:
+            text = df.read_text()
+        except OSError as e:
+            raise XcodonError(f"cannot read Dockerfile {df}: {e}") from e
+        return Builder(self, context, out).build(text, tags=tags, build_args=build_args, no_cache=no_cache)
 
     def info(self) -> dict:
         choice = self.engine_choice()

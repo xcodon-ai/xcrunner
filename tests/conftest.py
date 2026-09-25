@@ -148,7 +148,10 @@ def pack_rootfs_as_image(home: RuntimeHome, rootfs: Path, ref: str, config: dict
     cfg = {
         "architecture": "amd64",
         "os": "linux",
-        "config": {"Env": ["PATH=/bin"], "Cmd": ["/bin/sh"], "WorkingDir": "/workspace"},
+        # No PATH here: leaving it unset lets Runtime fall back to its own
+        # default search path (which still ends in /bin), the same way a
+        # real image that never sets ENV PATH gets docker's runtime default.
+        "config": {"Env": [], "Cmd": ["/bin/sh"], "WorkingDir": "/workspace"},
         "rootfs": {"type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(raw).hexdigest()]},
     }
     if config:
