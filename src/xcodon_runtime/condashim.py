@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -25,10 +26,18 @@ REFUSED_VERBS = frozenset({"activate", "deactivate", "init", "shell"})
 CONFIRM = frozenset({"create", "install", "update", "remove", "uninstall", "clean", "env create", "env remove"})
 CHANNELS = frozenset({"create", "install", "update", "search", "env create"})
 RECORD = frozenset({"create", "install", "update", "remove", "uninstall", "env create"})
-LOOKUP = frozenset({"list", "env export", "remove", "uninstall", "install", "update"})
+LOOKUP = frozenset({"list", "env export", "remove", "uninstall", "install", "update", "env remove"})
 NO_ROOT_FLAG = frozenset({"clean"})  # micromamba 2.9.0: "clean: The following arguments were not expected: -r"
 _DROP = frozenset({"CONDARC", "MAMBARC", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL",
                    "MAMBA_ROOT_PREFIX", "CONDA_ENVS_PATH", "CONDA_ENVS_DIRS", "CONDA_PKGS_DIRS"})
+# A combined short-flag token (`-yq`) sets `yes` when it has a `y` and none of these
+# option letters, which take a value and so must not be read as bare boolean flags.
+_SHORT_COMBO_RE = re.compile(r"^-[a-zA-Z]+$")
+_VALUE_LETTERS = frozenset("npcrf")
+CONFIG_NOT_SUPPORTED = (
+    "conda: xrunner's conda only supports `config list`; channels default to conda-forge "
+    "and bioconda, and -c adds more per command. Config changes are not supported.\n"
+)
 
 USAGE = """usage: conda COMMAND [OPTIONS]
 
@@ -49,6 +58,7 @@ class Parsed:
     tokens: list[str] = field(default_factory=list)
     name: str | None = None
     prefix: str | None = None
+    file: str | None = None
     root_flag: str | None = None
     yes: bool = False
     channels: list[str] = field(default_factory=list)
@@ -67,7 +77,14 @@ def parse_args(argv: Sequence[str]) -> Parsed:
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        opt = tok.split("=", 1)[0]
+        # A long option's name stops at `=`; a short option's is just its two characters
+        # (`-cbioconda`, `-r=/x`), so its own attached value is not mistaken for the flag.
+        if tok.startswith("--"):
+            opt = tok.split("=", 1)[0]
+        elif tok.startswith("-") and len(tok) > 1:
+            opt = tok[:2]
+        else:
+            opt = tok
         if p.verb is None and not tok.startswith("-"):
             p.verb = tok
             i += 1
@@ -78,13 +95,15 @@ def parse_args(argv: Sequence[str]) -> Parsed:
         if opt in ("-r", "--root-prefix"):
             p.root_flag, i = opt_value(tokens, i)
             continue
-        if opt in ("-n", "--name", "-p", "--prefix", "-c", "--channel"):
+        if opt in ("-n", "--name", "-p", "--prefix", "-c", "--channel", "-f", "--file"):
             value, j = opt_value(tokens, i)
             p.tokens.extend(tokens[i:j])
             if opt in ("-n", "--name"):
                 p.name = value
             elif opt in ("-p", "--prefix"):
                 p.prefix = value
+            elif opt in ("-f", "--file"):
+                p.file = value
             elif value is not None:
                 p.channels.append(value)
             i = j
@@ -97,6 +116,9 @@ def parse_args(argv: Sequence[str]) -> Parsed:
             p.help = True
         elif tok in ("-V", "--version") and p.verb is None:
             p.version = True
+        elif len(tok) > 2 and _SHORT_COMBO_RE.match(tok) and not (_VALUE_LETTERS & set(tok[1:])):
+            if "y" in tok[1:]:
+                p.yes = True
         p.tokens.append(tok)
         i += 1
     return p
@@ -128,17 +150,48 @@ def micromamba_argv(mm: Path, p: Parsed, root: Path) -> list[str]:
     return argv
 
 
+def _env_file_target(path: str, cwd: Path) -> tuple[str | None, str | None]:
+    """The top-level `name:`/`prefix:` of an `env create -f FILE` environment file: a
+    line starting at column 0 with `name:` or `prefix:`, its value stripped of quotes
+    and a trailing `#` comment. No YAML dependency; good enough to find where the
+    env landed so a record can be written after it."""
+    file_path = Path(path)
+    file_path = file_path if file_path.is_absolute() else cwd / file_path
+    try:
+        text = file_path.read_text()
+    except OSError:
+        return None, None
+    name = prefix = None
+    for line in text.splitlines():
+        for key in ("name:", "prefix:"):
+            if line.startswith(key):
+                value = line[len(key):].split("#", 1)[0].strip().strip("'\"")
+                if key == "name:":
+                    name = value
+                else:
+                    prefix = value
+    return name, prefix
+
+
 def target_prefix(p: Parsed, root: Path, cwd: Path) -> Path:
     if p.prefix:
         pp = Path(p.prefix)
         return pp if pp.is_absolute() else cwd / pp
     if p.name and p.name != "base":
         return root / "envs" / p.name
+    if p.key == "env create" and p.file:
+        name, prefix = _env_file_target(p.file, cwd)
+        if prefix:
+            pp = Path(prefix)
+            return pp if pp.is_absolute() else cwd / pp
+        if name and name != "base":
+            return root / "envs" / name
     return root
 
 
 def _write_record(mm: Path, prefix: Path, root: Path, env: dict[str, str], cwd: Path, err: TextIO) -> None:
     if not (prefix / "conda-meta").is_dir():
+        print(f"xrunner: warning: could not record the packages of {prefix}: no environment there", file=err)
         return
     r = subprocess.run([str(mm), "env", "export", "--no-rc", "-r", str(root), "-p", str(prefix), "--explicit"],
                        env=env, cwd=cwd, capture_output=True, text=True)
@@ -173,8 +226,16 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
     if p.verb in REFUSED_VERBS:
         print(ACTIVATE_MSG.format(verb=p.verb), file=err)
         return 1
+    if p.verb == "env" and p.sub is None and p.help:
+        # `conda env --help`/`-h`: no subcommand to validate against ENV_SUBVERBS, just
+        # micromamba's own help for the `env` verb.
+        mm = find_micromamba(home, environ)
+        return subprocess.run([str(mm), "env"] + p.tokens, env=environ, cwd=cwd).returncode
     if p.verb not in PASS_VERBS or (p.verb == "env" and p.sub not in ENV_SUBVERBS):
         print(f"conda: '{p.key}' is not supported by xrunner's conda.\n{USAGE}", end="", file=err)
+        return 2
+    if p.verb == "config" and (not p.tokens or p.tokens[0] != "list"):
+        print(CONFIG_NOT_SUPPORTED, end="", file=err)
         return 2
     mm = find_micromamba(home, environ)
     root = resolve_root(cwd, environ, home, p.root_flag)

@@ -23,10 +23,16 @@ class Root:
 
 
 def opt_value(tokens: list[str], i: int) -> tuple[str | None, int]:
-    """The value of the option at tokens[i] (`--opt=value` or `--opt value`) and the next index."""
+    """The value of the option at tokens[i], the way argparse (and so conda) reads it:
+    `--opt=value` or `--opt value` for a long option; for a short option, whatever is
+    attached to the same token right after the option letter (`-nfoo` is `foo`, `-n=foo`
+    is `=foo` -- the `=` is not special for a short option), else the next token."""
     tok = tokens[i]
-    if tok.startswith("--") and "=" in tok:
-        return tok.split("=", 1)[1], i + 1
+    if tok.startswith("--"):
+        if "=" in tok:
+            return tok.split("=", 1)[1], i + 1
+    elif len(tok) > 2:
+        return tok[2:], i + 1
     if i + 1 < len(tokens):
         return tokens[i + 1], i + 2
     return None, i + 1
@@ -62,3 +68,6 @@ def ensure_root(root: Path) -> None:
     except OSError as e:
         raise XcodonError(f"cannot create the conda root prefix {root}: {e}") from e
     os.makedirs(root / "envs", exist_ok=True)
+    # A fresh root is a base env too, as in real conda: without conda-meta here,
+    # a bare `conda list` (which targets the root itself) fails to find an environment.
+    os.makedirs(root / "conda-meta", exist_ok=True)
