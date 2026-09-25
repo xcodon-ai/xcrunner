@@ -81,3 +81,23 @@ def test_docker_is_still_the_default_kind(home, tmp_path, empty_path):
     assert cli.main(["shim", "install", "--dir", str(tmp_path / "d")]) == 0
     assert (tmp_path / "d" / "docker").exists() and not (tmp_path / "d" / "conda").exists()
     assert cli.main(["shim", "install", "docker", "--dir", str(tmp_path / "d"), "--micromamba", "x"]) == 125
+
+
+# -- fix round 1 -------------------------------------------------------------------------
+
+
+def test_write_shim_refuses_cleanly_on_a_read_only_dir(home, tmp_path, fake_mm, empty_path, capfd):
+    """An OSError while writing (a read-only DIR, here) must become a clean ShimRefused
+    -- exit 125 with a plain message -- not a raw traceback with exit 1."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory write permissions")
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim_dir.chmod(0o555)
+    try:
+        args = ["shim", "install", "conda", "--dir", str(shim_dir), "--micromamba", str(fake_mm)]
+        assert cli.main(args) == 125
+        err = capfd.readouterr().err
+        assert "cannot write" in err and "Traceback" not in err
+    finally:
+        shim_dir.chmod(0o755)

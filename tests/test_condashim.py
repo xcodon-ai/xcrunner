@@ -323,6 +323,46 @@ def test_record_warns_when_the_target_prefix_has_no_environment(home, project, f
                               "no environment there\n")
 
 
+# -- fix round 1 -------------------------------------------------------------------------
+
+
+def test_config_list_works_with_a_preceding_option(home, project, fake):
+    """`conda -q config list` used to exit 2: the config check read p.tokens[0], which
+    is the pre-verb `-q`, not `list`."""
+    root = project / ".xrunner-env" / "conda"
+    assert conda_main(["-q", "config", "list"], home, cwd=project, environ=_env(fake), err=io.StringIO()) == 0
+    assert read_log(fake[1])[0]["argv"] == ["config", "-q", "list", "--no-rc", "-r", str(root)]
+
+
+def test_config_change_with_a_preceding_option_is_still_refused(home, project, fake):
+    err = io.StringIO()
+    assert conda_main(["-q", "config", "--add", "channels", "x"], home, cwd=project,
+                      environ=_env(fake), err=err) == 2
+    assert "config list" in err.getvalue()
+    assert read_log(fake[1]) == []
+
+
+def test_dry_run_writes_no_record_and_prints_no_warning(home, project, fake):
+    """--dry-run creates nothing, so xrunner must neither write conda-explicit.txt (the
+    fake micromamba here still creates the env dirs, ignoring the flag, which is why
+    this fails without the fix: _write_record would find them and write anyway) nor
+    warn about a missing environment."""
+    root = project / ".xrunner-env" / "conda"
+    err = io.StringIO()
+    assert conda_main(["create", "--dry-run", "-n", "a", "x"], home, cwd=project,
+                      environ=_env(fake), err=err) == 0
+    assert not (root / "envs" / "a" / "conda-explicit.txt").exists()
+    assert err.getvalue() == ""
+
+
+def test_dry_run_short_flag_also_skips_the_record(home, project, fake):
+    root = project / ".xrunner-env" / "conda"
+    err = io.StringIO()
+    assert conda_main(["create", "-d", "-n", "b", "x"], home, cwd=project, environ=_env(fake), err=err) == 0
+    assert not (root / "envs" / "b" / "conda-explicit.txt").exists()
+    assert err.getvalue() == ""
+
+
 def test_env_create_from_file_uses_the_files_name(home, project, fake, tmp_path):
     root = project / ".xrunner-env" / "conda"
     envfile = tmp_path / "env.yml"

@@ -117,6 +117,11 @@ Offline, pass `--micromamba PATH` to use a binary you already have.
   can be rebuilt with `conda create -p PATH --file conda-explicit.txt`.
 - The shim refuses to install while a real conda, mamba or micromamba is on PATH,
   unless you pass `--force`.
+- The shims use the default xrunner home, or `XCODON_RUNTIME_HOME` when it is set;
+  they do not remember an `xrunner --home H` given at install time. After
+  `xrunner --home H shim install conda ...`, also export `XCODON_RUNTIME_HOME=H`
+  wherever the shims run, or they will look for micromamba in the default home
+  instead.
 
 ## Hosts without docker
 

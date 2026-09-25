@@ -26,6 +26,7 @@ REFUSED_VERBS = frozenset({"activate", "deactivate", "init", "shell"})
 CONFIRM = frozenset({"create", "install", "update", "remove", "uninstall", "clean", "env create", "env remove"})
 CHANNELS = frozenset({"create", "install", "update", "search", "env create"})
 RECORD = frozenset({"create", "install", "update", "remove", "uninstall", "env create"})
+DRY_RUN_FLAGS = frozenset({"-d", "--dry-run"})
 LOOKUP = frozenset({"list", "env export", "remove", "uninstall", "install", "update", "env remove"})
 NO_ROOT_FLAG = frozenset({"clean"})  # micromamba 2.9.0: "clean: The following arguments were not expected: -r"
 _DROP = frozenset({"CONDARC", "MAMBARC", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL",
@@ -271,9 +272,14 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
     if p.verb not in PASS_VERBS or (p.verb == "env" and p.sub not in ENV_SUBVERBS):
         print(f"conda: '{p.key}' is not supported by xrunner's conda.\n{USAGE}", end="", file=err)
         return 2
-    if p.verb == "config" and (not p.tokens or p.tokens[0] != "list"):
-        print(CONFIG_NOT_SUPPORTED, end="", file=err)
-        return 2
+    if p.verb == "config":
+        # p.tokens can start with a pre-verb option (`conda -q config list` puts `-q`
+        # in p.tokens too, ahead of `list`), so the sub-verb is the first token that
+        # is not itself an option, not just p.tokens[0].
+        sub = next((t for t in p.tokens if not t.startswith("-")), None)
+        if sub != "list":
+            print(CONFIG_NOT_SUPPORTED, end="", file=err)
+            return 2
     mm = find_micromamba(home, environ)
     root = resolve_root(cwd, environ, home, p.root_flag)
     if p.name and p.name != "base" and p.key in LOOKUP:
@@ -283,6 +289,6 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
         print(f"xrunner: no project env folder found; using {root.path}", file=err)
     env = micromamba_env(root.path, home, environ)
     code = subprocess.run(micromamba_argv(mm, p, root.path), env=env, cwd=cwd).returncode
-    if code == 0 and p.key in RECORD:
+    if code == 0 and p.key in RECORD and not (DRY_RUN_FLAGS & set(p.tokens)):
         _write_record(mm, target_prefix(p, root.path, cwd), root.path, env, cwd, err)
     return code

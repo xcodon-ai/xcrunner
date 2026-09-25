@@ -15,35 +15,18 @@ from xcodon_runtime.errors import PullError
 from xcodon_runtime.home import RuntimeHome
 from xcodon_runtime.reference import Platform, Reference
 from xcodon_runtime.registry import INDEX_TYPES, FetchedImage, FetchedLayer, select_platform
+from xcodon_runtime.shim import DOCKER_MARKER, is_xrunner_shim, resolve_real
 
 log = logging.getLogger(__name__)
 CHUNK = 1 << 20
 
-# Written as the first line of the `docker` shim `xrunner shim install` creates
-# (see cli.py). A resolved `docker` executable that contains this marker is our
-# own shim, not a real docker daemon client, and must never be treated as one:
-# otherwise xrunner would call itself for `docker version` / `docker save`.
-SHIM_MARKER = "# docker shim installed by xrunner"
-
-
-def is_shim(path: str) -> bool:
-    """True when ``path`` is a file that carries the xrunner shim marker near its start."""
-    try:
-        with open(path, "rb") as f:
-            return SHIM_MARKER.encode() in f.read(512)
-    except OSError:
-        return False
-
-
-def resolve_docker(name: str) -> str | None:
-    """Find an executable docker, like shutil.which, but skip an xrunner-installed shim."""
-    candidates = [name] if os.path.isabs(name) else [
-        os.path.join(d, name) for d in os.environ.get("PATH", "").split(os.pathsep) if d
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK) and not is_shim(candidate):
-            return candidate
-    return None
+# The docker shim marker, and the helpers that recognize/resolve it, live in
+# shim.py now (shared with the conda shim `xrunner shim install` also writes).
+# Kept public here under their original names: daemon.py uses them below, and
+# cli.py still imports `SHIM_MARKER` from this module.
+SHIM_MARKER = DOCKER_MARKER
+is_shim = is_xrunner_shim
+resolve_docker = resolve_real
 
 
 def _store_blob(tar: tarfile.TarFile, member: tarfile.TarInfo, home: RuntimeHome) -> None:

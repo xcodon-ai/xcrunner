@@ -909,18 +909,19 @@ The user's real `~/.conda` is never read or written.
 
 ### 12.6 Rerun record
 
-After a successful `create`, `install`, `update`, `remove` or `env create`
-on an env, xrunner writes `<prefix>/conda-explicit.txt` from `micromamba
-env export --explicit`. It lists every package URL with its checksum, so
-the env can be rebuilt exactly with `conda create -p PATH --file
-conda-explicit.txt`. A failed export logs a warning and does not change the
-command's exit code.
+After a successful `create`, `install`, `update`, `remove`, `uninstall` or
+`env create` on an env, xrunner writes `<prefix>/conda-explicit.txt` from
+`micromamba env export --explicit`. It lists every package URL with its
+checksum, so the env can be rebuilt exactly with `conda create -p PATH
+--file conda-explicit.txt`. A failed export logs a warning and does not
+change the command's exit code. `--dry-run`/`-d` writes no record and prints
+no warning either, since a dry run creates nothing to record.
 
 `env create -f FILE` without `-n` or `-p` takes the target env's name from
 the file's top-level `name:` line, the same as real micromamba: a `prefix:`
 line (which `conda env export` also writes) is ignored. With neither a name
-in the file nor `-n`/`-p` on the command line, it targets the root prefix
-itself.
+in the file nor `-n`/`-p` on the command line, it exits 1 with "No target
+prefix specified", the same as real micromamba.
 
 When one of those commands exits 0 but leaves no `<prefix>/conda-meta` at
 the target (for example an `install` into an env that was never created),

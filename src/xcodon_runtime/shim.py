@@ -11,9 +11,13 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
-from xcodon_runtime.daemon import SHIM_MARKER as DOCKER_MARKER
 from xcodon_runtime.errors import XcodonError
 
+# Written as the first line of the `docker`/`conda`/`mamba`/`micromamba` shims
+# `xrunner shim install` writes (see cli.py). A resolved executable that carries
+# one of these markers is our own shim, not a real docker/conda client, and must
+# never be treated as one: otherwise xrunner would call itself.
+DOCKER_MARKER = "# docker shim installed by xrunner"
 CONDA_MARKER = "# conda shim installed by xrunner"
 MARKERS = (DOCKER_MARKER, CONDA_MARKER)
 CONDA_NAMES = ("conda", "mamba", "micromamba")
@@ -34,7 +38,11 @@ def is_xrunner_shim(path: str | os.PathLike) -> bool:
 
 
 def resolve_real(name: str, path_value: str | None = None) -> str | None:
-    """Like shutil.which, but skip xrunner shims."""
+    """Like shutil.which, but skip xrunner shims. An absolute ``name`` is checked
+    directly, ignoring PATH (daemon.py's docker resolution can be given one)."""
+    if os.path.isabs(name):
+        ok = os.path.isfile(name) and os.access(name, os.X_OK) and not is_xrunner_shim(name)
+        return name if ok else None
     value = os.environ.get("PATH", "") if path_value is None else path_value
     for d in value.split(os.pathsep):
         if not d:
@@ -69,22 +77,29 @@ def check_install(target_dir: Path, names: Sequence[str], force: bool) -> None:
 
 
 def write_shim(target_dir: Path, name: str, marker: str, subcommand: str, xrunner: str | None = None) -> Path:
-    """Write ``target_dir/name`` atomically; a link there is replaced, never written through."""
-    target_dir.mkdir(parents=True, exist_ok=True)
+    """Write ``target_dir/name`` atomically; a link there is replaced, never written through.
+
+    An OSError anywhere in here (a read-only DIR, for example) becomes a ShimRefused,
+    so the CLI exits 125 with a plain message instead of a raw traceback.
+    """
     path = target_dir / name
     script = f"#!/bin/sh\n{marker}\nexec {shlex.quote(xrunner or xrunner_executable())} {subcommand} \"$@\"\n"
-    fd, tmp_name = tempfile.mkstemp(dir=target_dir, prefix=f".{name}-shim-")
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(script)
-        os.chmod(tmp_name, 0o755)
-        os.replace(tmp_name, path)
-    except BaseException:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=target_dir, prefix=f".{name}-shim-")
         try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, "w") as f:
+                f.write(script)
+            os.chmod(tmp_name, 0o755)
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except OSError as e:
+        raise ShimRefused(f"cannot write {path}: {e}") from e
     return path
 
 

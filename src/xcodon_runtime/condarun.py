@@ -17,12 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence, TextIO
 
-from xcodon_runtime.condaroot import lookup_root, opt_value, resolve_root
+from xcodon_runtime.condaroot import ensure_root, lookup_root, opt_value, resolve_root
 from xcodon_runtime.home import RuntimeHome
 
 _VALUE_OPTS = ("-n", "--name", "-p", "--prefix", "-r", "--root-prefix", "--cwd")
 _IGNORED = frozenset({"--no-capture-output", "--live-stream", "-v", "--verbose", "--dev",
-                      "--debug-wrapper-scripts", "-q", "--quiet", "--no-rc"})
+                      "--debug-wrapper-scripts", "-q", "--quiet", "--no-rc", "--json"})
 _HELP_OPTS = frozenset({"-h", "--help"})
 
 RUN_USAGE = """usage: conda run [-n NAME | -p PATH] [-r ROOT] [--cwd DIR] COMMAND [ARG...]
@@ -130,6 +130,10 @@ def run_main(argv: Sequence[str], home: RuntimeHome, cwd: Path, environ: Mapping
         prefix = root.path / "envs" / a.name
         label = a.name
     else:
+        # The base env, real conda's root itself: it always exists, so a fresh
+        # root prefix (no `create` yet) is made into a valid one here, the same
+        # way `ensure_root` does for every other conda verb.
+        ensure_root(root.path)
         prefix = root.path
         label = "base"
     if not (prefix / "conda-meta").is_dir():

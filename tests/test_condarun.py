@@ -135,6 +135,19 @@ def test_base_env_is_the_root(project, env):
     assert _xr(["conda", "run", "basetool"], project, env).stdout == "base\n"
 
 
+def test_run_ensures_a_fresh_root_is_a_valid_base_env(project, env):
+    """A fresh project has `.xrunner-env` but no conda-meta at the root itself (only
+    the `tools` env the fixture builds has it). `conda run` with no -n/-p targets the
+    root as the base env, which real conda's own root always is; xrunner must make
+    that true here too instead of reporting a missing environment."""
+    root = project / ".xrunner-env" / "conda"
+    assert not (root / "conda-meta").is_dir()
+    r = _xr(["conda", "run", "sh", "-c", "echo hi"], project, env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "hi\n"
+    assert (root / "conda-meta").is_dir()
+
+
 def test_name_and_prefix_together_exit_2(project, env):
     r = _xr(["conda", "run", "-n", "tools", "-p", "workspace", "echoargs"], project, env)
     assert r.returncode == 2 and "not both" in r.stderr
@@ -162,6 +175,14 @@ def test_dispatch_accepts_options_before_the_run_verb(project, env, tmp_path):
     assert r.stdout == "from-x\n", r.stderr
     r = _xr(["conda", "-q", "run", "-n", "tools", "echoargs", "z"], project, env)
     assert r.stdout.splitlines()[0] == "z|", r.stderr
+
+
+def test_json_option_before_run_is_ignored(project, env):
+    """`conda --json run ...` (an option before the verb, spec 12.5) used to fail with
+    `unknown option --json`, because condarun only ignored -q/--quiet and friends."""
+    r = _xr(["conda", "--json", "run", "-n", "tools", "echoargs", "z"], project, env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[0] == "z|"
 
 
 def test_missing_path_falls_back_to_os_defpath(project, home):
