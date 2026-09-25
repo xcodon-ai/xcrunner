@@ -170,7 +170,15 @@ def micromamba_env(root: Path, home: RuntimeHome, environ: Mapping[str, str]) ->
 
 
 def micromamba_argv(mm: Path, p: Parsed, root: Path) -> list[str]:
-    argv = [str(mm), p.verb or ""] + ([p.sub] if p.sub else []) + p.tokens + ["--no-rc"]
+    tokens = p.tokens
+    # conda's `-d` means `--dry-run`; micromamba 2.9.0 only defines `--dry-run` (no
+    # `-d`) and rejects a bare `-d` outright ("The following argument was not
+    # expected: -d"), on exactly the verbs conda itself defines -d/--dry-run for --
+    # which is also RECORD's verb list, the ones that would modify an env. Elsewhere
+    # `-d` is left alone (it is not a recognized conda flag there either).
+    if p.key in RECORD and "-d" in tokens:
+        tokens = ["--dry-run" if t == "-d" else t for t in tokens]
+    argv = [str(mm), p.verb or ""] + ([p.sub] if p.sub else []) + tokens + ["--no-rc"]
     if p.key not in NO_ROOT_FLAG:
         argv += ["-r", str(root)]
     if p.key in CONFIRM and not p.yes:

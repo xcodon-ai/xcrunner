@@ -17,6 +17,11 @@ if log:
     with open(log, "a") as f:
         f.write(json.dumps({"argv": args, "cwd": os.getcwd(),
                             "env": {k: os.environ.get(k) for k in keys}}) + "\n")
+if "-d" in args:
+    # Real micromamba 2.9.0 has no `-d` (only `--dry-run`) and rejects an unknown
+    # option outright; a caller must translate conda's `-d` itself before this point.
+    sys.stderr.write("The following argument was not expected: -d\n")
+    sys.exit(2)
 if args == ["--version"]:
     print("2.9.0")
     sys.exit(0)

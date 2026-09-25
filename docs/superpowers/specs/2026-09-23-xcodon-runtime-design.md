@@ -915,7 +915,10 @@ After a successful `create`, `install`, `update`, `remove`, `uninstall` or
 checksum, so the env can be rebuilt exactly with `conda create -p PATH
 --file conda-explicit.txt`. A failed export logs a warning and does not
 change the command's exit code. `--dry-run`/`-d` writes no record and prints
-no warning either, since a dry run creates nothing to record.
+no warning either, since a dry run creates nothing to record. Micromamba
+2.9.0 has no `-d`, only `--dry-run`, and rejects a bare `-d` outright; on
+these same verbs xrunner translates conda's `-d` to `--dry-run` before
+calling micromamba.
 
 `env create -f FILE` without `-n` or `-p` takes the target env's name from
 the file's top-level `name:` line, the same as real micromamba: a `prefix:`

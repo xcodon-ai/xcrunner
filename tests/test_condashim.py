@@ -351,16 +351,35 @@ def test_dry_run_writes_no_record_and_prints_no_warning(home, project, fake):
     err = io.StringIO()
     assert conda_main(["create", "--dry-run", "-n", "a", "x"], home, cwd=project,
                       environ=_env(fake), err=err) == 0
+    argv = read_log(fake[1])[0]["argv"]
+    assert "--dry-run" in argv and "-d" not in argv
     assert not (root / "envs" / "a" / "conda-explicit.txt").exists()
     assert err.getvalue() == ""
 
 
-def test_dry_run_short_flag_also_skips_the_record(home, project, fake):
+def test_dry_run_short_flag_is_translated_to_dry_run_and_skips_the_record(home, project, fake):
+    """conda's `-d` means `--dry-run`, but micromamba 2.9.0 has no `-d` at all and
+    rejects it outright (the fake now mirrors this, see fake_micromamba.py): xrunner
+    must translate `-d` to `--dry-run` before it ever reaches micromamba, not just
+    pass it through. Without the translation this fails with exit code 2, "not
+    expected: -d", from the fake."""
     root = project / ".xrunner-env" / "conda"
     err = io.StringIO()
     assert conda_main(["create", "-d", "-n", "b", "x"], home, cwd=project, environ=_env(fake), err=err) == 0
+    argv = read_log(fake[1])[0]["argv"]
+    assert "--dry-run" in argv and "-d" not in argv
     assert not (root / "envs" / "b" / "conda-explicit.txt").exists()
     assert err.getvalue() == ""
+
+
+def test_dash_d_is_left_alone_outside_the_dry_run_verbs(home, project, fake):
+    """conda does not define -d/--dry-run for `list`; xrunner must not translate a
+    bare `-d` there (it is simply an unrecognized flag, same as real conda/micromamba
+    would see, and RECORD does not apply to `list` anyway). The fake rejects any
+    bare `-d` it receives, so this also confirms it reached micromamba untouched."""
+    assert conda_main(["list", "-d"], home, cwd=project, environ=_env(fake), err=io.StringIO()) == 2
+    argv = read_log(fake[1])[0]["argv"]
+    assert "-d" in argv and "--dry-run" not in argv
 
 
 def test_env_create_from_file_uses_the_files_name(home, project, fake, tmp_path):
