@@ -666,3 +666,147 @@ def test_copy_dest_through_non_directory_component_raises(rt, tmp_path):
     (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY f /etc/passwd/x\n")
     with pytest.raises(XcodonError, match="directory"):
         rt.build(ctx)
+
+
+# -- round 4, item 1: a non-directory entry keeps its own name --------------
+#
+# A directory entry of a COPY source resolves through the image's symlinks
+# (so merged-/usr ``COPY rootfs/ /`` still works). A file or symlink entry
+# resolves only its parent; whatever is at its own name is replaced, the way
+# docker and overlay layering do it.
+
+def _merged_usr_image(home, tmp_path, name):
+    from tests.conftest import build_busybox_rootfs, pack_rootfs_as_image
+
+    root = build_busybox_rootfs(tmp_path / name)
+    (root / "usr").mkdir()
+    shutil.move(str(root / "bin"), str(root / "usr" / "bin"))
+    (root / "bin").symlink_to("usr/bin")
+    pack_rootfs_as_image(home, root, f"xcodon-test/{name}:latest")
+    return f"xcodon-test/{name}"
+
+
+def test_copy_symlink_entry_replaces_image_link_not_its_target_dir(rt, tmp_path, home):
+    # N9: /lib64 -> lib in both the image and the context.
+    from tests.conftest import build_busybox_rootfs, pack_rootfs_as_image
+
+    root = build_busybox_rootfs(tmp_path / "libimg")
+    (root / "lib").mkdir()
+    (root / "lib" / "libc.so").write_text("libc")
+    (root / "lib64").symlink_to("lib")
+    pack_rootfs_as_image(home, root, "xcodon-test/libimg:latest")
+
+    ctx = tmp_path / "ctx-n9"
+    (ctx / "rootfs" / "lib").mkdir(parents=True)
+    (ctx / "rootfs" / "lib" / "libx.so").write_text("libx")
+    (ctx / "rootfs" / "lib64").symlink_to("lib")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/libimg\nCOPY rootfs/ /\n")
+    built = rt.build(ctx)
+    lib = built.rootfs / "lib"
+    assert not lib.is_symlink() and lib.is_dir()
+    assert (lib / "libc.so").read_text() == "libc"
+    assert (lib / "libx.so").read_text() == "libx"
+    assert os.readlink(built.rootfs / "lib64") == "lib"
+
+
+def test_copy_symlink_entry_on_merged_usr_keeps_usr_bin(rt, tmp_path, home):
+    # N10: a context holding only rootfs/bin -> usr/bin must not turn
+    # /usr/bin into a link to itself.
+    ref = _merged_usr_image(home, tmp_path, "mergedusr4")
+    ctx = tmp_path / "ctx-n10"
+    (ctx / "rootfs").mkdir(parents=True)
+    (ctx / "rootfs" / "bin").symlink_to("usr/bin")
+    (ctx / "Dockerfile").write_text(f"FROM {ref}\nCOPY rootfs/ /\nRUN echo still-runs > /out\n")
+    built = rt.build(ctx)
+    assert os.readlink(built.rootfs / "bin") == "usr/bin"
+    usr_bin = built.rootfs / "usr" / "bin"
+    assert not usr_bin.is_symlink() and usr_bin.is_dir()
+    assert (usr_bin / "busybox").is_file()
+    assert (built.rootfs / "out").read_text() == "still-runs\n"
+
+
+def _link_image(home, tmp_path, name):
+    from tests.conftest import build_busybox_rootfs, pack_rootfs_as_image
+
+    root = build_busybox_rootfs(tmp_path / name)
+    (root / "usr" / "share" / "zoneinfo").mkdir(parents=True)
+    (root / "usr" / "share" / "zoneinfo" / "UTC").write_text("utc-data")
+    (root / "etc" / "localtime").symlink_to("../usr/share/zoneinfo/UTC")
+    (root / "opt").mkdir()
+    (root / "opt" / "app").symlink_to("/nonexist")
+    pack_rootfs_as_image(home, root, f"xcodon-test/{name}:latest")
+    return f"xcodon-test/{name}"
+
+
+def test_copy_file_entry_replaces_image_link_to_a_file(rt, tmp_path, home):
+    # N4, first case: the zoneinfo file must stay untouched.
+    ref = _link_image(home, tmp_path, "linkimg1")
+    ctx = tmp_path / "ctx-n4a"
+    (ctx / "rootfs" / "etc").mkdir(parents=True)
+    (ctx / "rootfs" / "etc" / "localtime").write_text("new-tz")
+    (ctx / "Dockerfile").write_text(f"FROM {ref}\nCOPY rootfs/ /\n")
+    built = rt.build(ctx)
+    localtime = built.rootfs / "etc" / "localtime"
+    assert not localtime.is_symlink()
+    assert localtime.read_text() == "new-tz"
+    assert (built.rootfs / "usr" / "share" / "zoneinfo" / "UTC").read_text() == "utc-data"
+
+
+def test_copy_file_entry_replaces_dangling_image_link(rt, tmp_path, home):
+    # N4, second case: a dangling absolute link must not create its target.
+    ref = _link_image(home, tmp_path, "linkimg2")
+    ctx = tmp_path / "ctx-n4b"
+    (ctx / "rootfs" / "opt").mkdir(parents=True)
+    (ctx / "rootfs" / "opt" / "app").write_text("app")
+    (ctx / "Dockerfile").write_text(f"FROM {ref}\nCOPY rootfs/ /\n")
+    built = rt.build(ctx)
+    app = built.rootfs / "opt" / "app"
+    assert not app.is_symlink()
+    assert app.read_text() == "app"
+    assert not os.path.lexists(built.rootfs / "nonexist")
+
+
+def test_copy_single_file_dest_replaces_image_link(rt, tmp_path, home):
+    # The top-level ``COPY f /dest`` form follows the same rule.
+    ref = _link_image(home, tmp_path, "linkimg3")
+    ctx = tmp_path / "ctx-n4c"
+    ctx.mkdir()
+    (ctx / "tz").write_text("new-tz")
+    (ctx / "app").write_text("app")
+    (ctx / "Dockerfile").write_text(f"FROM {ref}\nCOPY tz /etc/localtime\nCOPY app /opt/app\n")
+    built = rt.build(ctx)
+    localtime = built.rootfs / "etc" / "localtime"
+    assert not localtime.is_symlink() and localtime.read_text() == "new-tz"
+    assert (built.rootfs / "usr" / "share" / "zoneinfo" / "UTC").read_text() == "utc-data"
+    app = built.rootfs / "opt" / "app"
+    assert not app.is_symlink() and app.read_text() == "app"
+    assert not os.path.lexists(built.rootfs / "nonexist")
+
+
+def test_copy_single_file_dest_parent_resolves_through_image_link(rt, tmp_path, home):
+    # Only the parent resolves: /bin/newtool on merged-/usr lands in /usr/bin.
+    # A dest that is a link to a directory is still a directory destination.
+    ref = _merged_usr_image(home, tmp_path, "mergedusr5")
+    ctx = tmp_path / "ctx-parent"
+    ctx.mkdir()
+    (ctx / "newtool").write_text("new")
+    (ctx / "other").write_text("other")
+    (ctx / "Dockerfile").write_text(f"FROM {ref}\nCOPY newtool /bin/newtool\nCOPY other /bin\n")
+    built = rt.build(ctx)
+    assert os.readlink(built.rootfs / "bin") == "usr/bin"
+    assert (built.rootfs / "usr" / "bin" / "newtool").read_text() == "new"
+    assert (built.rootfs / "usr" / "bin" / "other").read_text() == "other"
+
+
+def test_copy_file_replaces_earlier_source_symlink_pointing_outside(rt, tmp_path):
+    # An earlier source's symlink at the same name is removed, not written
+    # through, even when its target lies outside the layer.
+    ctx = tmp_path / "ctx-linkthenfile"
+    (ctx / "a").mkdir(parents=True)
+    (ctx / "a" / "x").symlink_to("/nonexist-outside")
+    (ctx / "b").mkdir()
+    (ctx / "b" / "x").write_text("file-x")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY a/ b/ /y/\n")
+    built = rt.build(ctx)
+    x = built.rootfs / "y" / "x"
+    assert not x.is_symlink() and x.read_text() == "file-x"

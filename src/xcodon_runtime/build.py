@@ -485,24 +485,44 @@ class Builder:
                 mode_fixups.append((cur, mode))
         return cur
 
+    def _place_non_dir(self, layer: Path, src: Path, target: Path, mode_fixups: list[tuple[Path, int]]) -> None:
+        """Put a file or symlink from the context at exactly ``target`` in the layer.
+
+        ``target`` keeps the entry's own name: it is never resolved through
+        a symlink, in the image or in the layer. Whatever the layer already
+        holds at that name is removed first. When the layer is applied, the
+        entry then replaces whatever the image has at that name (a link, a
+        file, or a directory), the way docker and overlay layering do it.
+        The parent is checked to be inside the layer before anything is
+        removed, and the target is checked again before it is written.
+        """
+        self._assert_within_layer(layer, target.parent)
+        self._remove_existing(target, mode_fixups)
+        self._assert_within_layer(layer, target)
+        if src.is_symlink():
+            os.symlink(os.readlink(src), target)
+        else:
+            shutil.copy2(src, target, follow_symlinks=False)
+
     def _copy_tree_into(self, src: Path, image: Image, dest_rel: str, layer: Path,
                          mode_fixups: list[tuple[Path, int]]) -> None:
         """Merge the contents of a source directory into the guest directory at ``dest_rel``.
 
-        ``dest_rel`` is already symlink-resolved; each entry's own
-        destination is resolved fresh through ``resolve_in_rootfs`` again
-        (not just inherited from the parent), so a symlink encountered at
-        *any* nesting level -- not only at the top of the merge -- still
-        redirects placement to its target, the same way a top-level COPY
-        destination does. A later source (or a later entry in the same
-        source) always wins: an existing non-directory in the way of a
-        directory entry is replaced (via ``_materialize_dir``), and a file
-        or symlink placement always removes whatever was there first.
+        ``dest_rel`` is already symlink-resolved and already exists in the
+        layer. A directory entry resolves its own path through the image's
+        symlinks again (``resolve_in_rootfs``), so a link at any nesting
+        level, such as ``/bin -> usr/bin``, still redirects the merge to its
+        target. A file or symlink entry resolves only its parent, which is
+        ``dest_rel``, and keeps its own name (see ``_place_non_dir``). A
+        later source, or a later entry in the same source, always wins: a
+        directory entry replaces a non-directory in its way (via
+        ``_materialize_dir``), and a file or symlink replaces whatever is at
+        its name.
         """
         for entry in sorted(os.scandir(src), key=lambda e: e.name):
-            child_rel_raw = f"{dest_rel}/{entry.name}" if dest_rel else entry.name
-            resolved_child_rel = resolve_in_rootfs(image.rootfs, "/" + child_rel_raw).lstrip("/")
             if entry.is_dir(follow_symlinks=False):
+                child_rel_raw = f"{dest_rel}/{entry.name}" if dest_rel else entry.name
+                resolved_child_rel = resolve_in_rootfs(image.rootfs, "/" + child_rel_raw).lstrip("/")
                 # _materialize_dir queues this directory's own mode fixup (using
                 # the rootfs's existing mode when there is one, else this
                 # entry's own mode) only the first time it creates it; a
@@ -512,15 +532,8 @@ class Builder:
                 self._materialize_dir(layer, resolved_child_rel, image, mode, mode_fixups)
                 self._copy_tree_into(Path(entry.path), image, resolved_child_rel, layer, mode_fixups)
                 continue
-            parent_rel = os.path.dirname(resolved_child_rel)
-            parent_dir = self._materialize_dir(layer, parent_rel, image, 0o755, mode_fixups) if parent_rel else layer
-            child_target = parent_dir / os.path.basename(resolved_child_rel)
-            self._assert_within_layer(layer, child_target)
-            self._remove_existing(child_target, mode_fixups)
-            if entry.is_symlink():
-                os.symlink(os.readlink(entry.path), child_target)
-            else:
-                shutil.copy2(entry.path, child_target, follow_symlinks=False)
+            parent_dir = self._materialize_dir(layer, dest_rel, image, 0o755, mode_fixups) if dest_rel else layer
+            self._place_non_dir(layer, Path(entry.path), parent_dir / entry.name, mode_fixups)
 
     def _copy_step(self, image: Image, sources: list[Path], dest: str, text: str, ins: Instruction) -> Image:
         workdir = image.config.get("config", {}).get("WorkingDir") or "/"
@@ -554,18 +567,16 @@ class Builder:
                     self._copy_tree_into(src, image, dest_rel, layer, mode_fixups)
                 elif dest_is_dir:
                     target_dir = self._materialize_dir(layer, dest_rel, image, 0o755, mode_fixups)
-                    target = target_dir / src.name
-                    self._assert_within_layer(layer, target)
-                    self._remove_existing(target, mode_fixups)
-                    shutil.copy2(src, target, follow_symlinks=False)
+                    self._place_non_dir(layer, src, target_dir / src.name, mode_fixups)
                 else:
-                    parent_rel = os.path.dirname(dest_rel)
-                    if parent_rel:
-                        self._materialize_dir(layer, parent_rel, image, 0o755, mode_fixups)
-                    target = layer / dest_rel
-                    self._assert_within_layer(layer, target)
-                    self._remove_existing(target, mode_fixups)
-                    shutil.copy2(src, target, follow_symlinks=False)
+                    # A file destination resolves only its parent through the
+                    # image's symlinks. Its own name is kept, so a link already
+                    # at that name is replaced, never written through.
+                    parent_guest, name = posixpath.split(posixpath.normpath("/" + dest_abs.lstrip("/")))
+                    parent_rel = resolve_in_rootfs(image.rootfs, parent_guest).lstrip("/")
+                    parent_dir = (self._materialize_dir(layer, parent_rel, image, 0o755, mode_fixups)
+                                  if parent_rel else layer)
+                    self._place_non_dir(layer, src, parent_dir / name, mode_fixups)
             self._apply_mode_fixups(layer, mode_fixups)
             return self.rt.images.commit(image, layer, created_by=f"{ins.name} {text}")
         finally:
