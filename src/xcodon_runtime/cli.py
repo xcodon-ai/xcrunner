@@ -333,7 +333,11 @@ def cmd_images(rt: Runtime, args) -> int:
 
 
 def cmd_rmi(rt: Runtime, args) -> int:
-    rt.remove_image(args.image)
+    untagged, deleted = rt.remove_image(args.image)
+    for name in untagged:
+        print(f"Untagged: {name}")
+    if deleted:
+        print(f"Deleted: sha256:{deleted}")
     return 0
 
 

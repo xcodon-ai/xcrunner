@@ -237,3 +237,18 @@ def test_cli_env_dir_persists_installs(home, busybox_image, engine_name, tmp_pat
     assert c.env_dir == str(env)
     assert cli.main([*e, "rm", "envc"]) == 0
     assert (env / c.image_id).is_dir()
+
+
+def test_rmi_reports_untagged_and_deleted(home, busybox_image, capfd):
+    from xcodon_runtime import cli as cli_mod
+
+    assert cli_mod.main(["tag", "xcodon-test/busybox", "xcodon-test/busybox:second"]) == 0
+    capfd.readouterr()
+    assert cli_mod.main(["rmi", "xcodon-test/busybox:second"]) == 0
+    out = capfd.readouterr().out
+    assert out == "Untagged: docker.io/xcodon-test/busybox:second\n", "a shared image is only untagged"
+    assert cli_mod.main(["rmi", "xcodon-test/busybox"]) == 0
+    out = capfd.readouterr().out.splitlines()
+    assert out == ["Untagged: docker.io/xcodon-test/busybox:latest", f"Deleted: sha256:{busybox_image.id}"]
+    assert cli_mod.main(["rmi", "xcodon-test/busybox"]) == 125
+    assert "run: xrunner pull" in capfd.readouterr().err

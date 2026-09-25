@@ -103,8 +103,9 @@ class Runtime:
     def list_images(self) -> list[Image]:
         return self.images.images()
 
-    def remove_image(self, ref: str) -> None:
-        self.images.remove(ref)
+    def remove_image(self, ref: str) -> tuple[list[str], str | None]:
+        """Remove a ref; returns the refs removed and the deleted image id, if any."""
+        return self.images.remove(ref)
 
     def resolve_image(self, ref: str, pull: str = "missing") -> Image:
         if pull == "always":

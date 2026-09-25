@@ -96,7 +96,7 @@ class ImageStore:
     def require(self, ref_or_id: str) -> Image:
         img = self.get(ref_or_id)
         if img is None:
-            raise ImageNotFound(f"image {ref_or_id!r} is not in the local store; run: xcodon pull {ref_or_id}")
+            raise ImageNotFound(f"image {ref_or_id!r} is not in the local store; run: xrunner pull {ref_or_id}")
         return img
 
     def images(self) -> list[Image]:
@@ -282,8 +282,11 @@ class ImageStore:
 
     # -- remove / inspect / prune ------------------------------------------------
 
-    def remove(self, ref_or_id: str) -> None:
+    def remove(self, ref_or_id: str) -> tuple[list[str], str | None]:
         """Drop a ref and, if nothing else references the image, delete it.
+
+        Returns the refs that were removed and the id of the deleted image,
+        or None when another ref still keeps the image.
 
         Holds ``store`` exclusive (a writer), so no concurrent ``pull`` can
         add a ref to this image between the refs update and the directory
@@ -297,17 +300,22 @@ class ImageStore:
                     name = parse_reference(ref_or_id).name
                 except ValueError:
                     name = None
+                untagged: list[str] = []
                 if name in refs:
                     del refs[name]
+                    untagged.append(name)
                 else:
                     for n in list(refs):
                         if refs[n] == img.id:
                             del refs[n]
+                            untagged.append(n)
                 self.home.write_refs(refs)
                 still_referenced = img.id in refs.values()
-            if not still_referenced:
-                with self.home.lock(f"image-{img.id}"):
-                    shutil.rmtree(img.dir, ignore_errors=True)
+            if still_referenced:
+                return untagged, None
+            with self.home.lock(f"image-{img.id}"):
+                shutil.rmtree(img.dir, ignore_errors=True)
+            return untagged, img.id
 
     def inspect(self, ref_or_id: str) -> list[dict]:
         img = self.get(ref_or_id)
