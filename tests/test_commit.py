@@ -161,6 +161,7 @@ def test_resolve_reimports_when_daemon_id_changed(home, busybox_image, monkeypat
 
     m = json.loads((busybox_image.dir / "manifest.json").read_text())
     m["source"] = "daemon"
+    m["daemon_id"] = "sha256:" + "d" * 64
     (busybox_image.dir / "manifest.json").write_text(json.dumps(m))
     rt = Runtime(home.path, engine="ns")
     calls = []
@@ -169,7 +170,7 @@ def test_resolve_reimports_when_daemon_id_changed(home, busybox_image, monkeypat
     monkeypatch.setattr(ImageStore, "pull", lambda self, ref, platform=None: calls.append(ref) or busybox_image)
     rt.resolve_image("xcodon-test/busybox")
     assert calls == ["xcodon-test/busybox"]
-    monkeypatch.setattr(DaemonSource, "image_id", lambda self, ref: "sha256:" + busybox_image.id)
+    monkeypatch.setattr(DaemonSource, "image_id", lambda self, ref: "sha256:" + "d" * 64)
     rt.resolve_image("xcodon-test/busybox")
     assert calls == ["xcodon-test/busybox"], "same id: no second pull"
     m["source"] = "commit"

@@ -43,6 +43,11 @@ class FetchedImage:
     config: dict
     layers: list[FetchedLayer] = field(default_factory=list)
     source: str = "registry"
+    # The local docker daemon's own id for the tag (``docker image inspect
+    # --format {{.Id}}``) at export time. Only a daemon import sets it. With
+    # docker's containerd image store it is the manifest digest, not the
+    # config digest, so it is kept as is and compared as is.
+    daemon_id: str | None = None
 
 
 def select_platform(manifests: list[dict], platform: Platform) -> str:

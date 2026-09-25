@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -148,27 +149,46 @@ class ImageStore:
             image_dir = self.home.images / image_id
             with self.home.lock(f"image-{image_id}"):
                 if not image_dir.exists():
+                    manifest = {
+                        "config": fetched.config_digest,
+                        "diff_ids": diff_ids,
+                        "layers": [{"digest": l.digest, "mediaType": l.media_type, "size": l.size} for l in fetched.layers],
+                        "source": fetched.source,
+                    }
+                    if fetched.daemon_id:
+                        manifest["daemon_id"] = fetched.daemon_id
                     with self.home.atomic_dir(image_dir) as tmp:
                         (tmp / "config.json").write_text(json.dumps(fetched.config, indent=2))
-                        (tmp / "manifest.json").write_text(
-                            json.dumps(
-                                {
-                                    "config": fetched.config_digest,
-                                    "diff_ids": diff_ids,
-                                    "layers": [{"digest": l.digest, "mediaType": l.media_type, "size": l.size} for l in fetched.layers],
-                                    "source": fetched.source,
-                                },
-                                indent=2,
-                            )
-                        )
+                        (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2))
                         log.info("flattening %d layers for %s", len(layer_dirs), image_id[:12])
                         build_rootfs(layer_dirs, tmp / "rootfs")
+                elif fetched.daemon_id:
+                    self._record_daemon_id(image_dir, fetched.daemon_id)
             for layer in fetched.layers:
                 layer.blob_path.unlink(missing_ok=True)
             (self.home.blobs / image_id).unlink(missing_ok=True)
 
             self._set_ref(ref_name, image_id)
             return self._load(image_id)
+
+    def _record_daemon_id(self, image_dir: Path, daemon_id: str) -> None:
+        """Store the daemon's id in an existing daemon-sourced image's manifest.
+
+        An image imported before ``daemon_id`` existed, or imported again after
+        the daemon gave the same image a new id, gets the current id here.
+        The caller holds the image lock. The write is atomic.
+        """
+        path = image_dir / "manifest.json"
+        try:
+            manifest = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return
+        if manifest.get("source") != "daemon" or manifest.get("daemon_id") == daemon_id:
+            return
+        manifest["daemon_id"] = daemon_id
+        tmp = path.with_name("manifest.json.tmp")
+        tmp.write_text(json.dumps(manifest, indent=2))
+        os.replace(tmp, path)
 
     def _ensure_layer(self, diff_id: str, blob_path: Path) -> Path:
         hexdigest = diff_id.split(":", 1)[1]

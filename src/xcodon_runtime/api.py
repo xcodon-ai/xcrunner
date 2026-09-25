@@ -7,6 +7,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -110,17 +111,48 @@ class Runtime:
             return self.images.pull(ref)
         img = self.images.get(ref)
         if img is not None:
-            if self._daemon_tag_moved(ref, img):
+            # Spec 11.5: only "missing" looks for a moved daemon tag. "never"
+            # means "use the store as is", and an image id names one image
+            # for good, so neither asks the daemon.
+            if pull == "missing" and not self._is_id_ref(ref, img) and self._daemon_tag_moved(ref, img):
                 log.info("image %s changed in the local docker daemon; importing it again", ref)
-                return self.images.pull(ref)
+                try:
+                    return self.images.pull(ref)
+                except XcodonError as e:
+                    log.warning("could not import %s again from the local docker daemon (%s); "
+                                "using the stored image %s", ref, e, img.short_id)
+                    return img
             return img
         if pull == "never":
             raise ImageNotFound(f"image {ref!r} is not in the local store")
         log.info("image %s not found locally; pulling", ref)
         return self.images.pull(ref)
 
+    def _is_id_ref(self, ref: str, img: Image) -> bool:
+        """True when ``ref`` named ``img`` by its id (all 64 hex digits, or a unique prefix), not by a tag."""
+        candidate = ref.removeprefix("sha256:")
+        if not re.fullmatch(r"[0-9a-f]{4,64}", candidate) or not img.id.startswith(candidate):
+            return False
+        if len(candidate) == 64 or ref.startswith("sha256:"):
+            return True
+        # A short hex string is also a valid repository name. It is an id
+        # only when no tag of that name exists (ImageStore.get tries tags first).
+        try:
+            name = parse_reference(ref).name
+        except XcodonError:
+            return True
+        return name not in self.home.read_refs()
+
     def _daemon_tag_moved(self, ref: str, img: Image) -> bool:
-        """True when a daemon-sourced tag now points at a different image in the daemon."""
+        """True when a daemon-sourced tag now points at a different image in the daemon.
+
+        Compares the daemon's current ``.Id`` for the tag with the ``daemon_id``
+        recorded at import. That id is the config digest with docker's classic
+        image store, but the manifest digest with the containerd image store,
+        so it is never compared with the stored image id. An image imported
+        before ``daemon_id`` was recorded counts as moved once: the import
+        records the id.
+        """
         try:
             manifest = json.loads((img.dir / "manifest.json").read_text())
         except (OSError, ValueError):
@@ -137,7 +169,10 @@ class Runtime:
         # ``image_id`` returning None already covers "no such tag in the
         # daemon", so there is no need for a separate ``has_image`` call.
         current = daemon.image_id(reference)
-        return bool(current) and current != f"sha256:{img.id}"
+        if not current:
+            return False
+        stored = manifest.get("daemon_id")
+        return not stored or current != stored
 
     # -- containers --------------------------------------------------------------
 

@@ -172,6 +172,10 @@ class DaemonSource:
         if not exe:
             raise PullError(f"no usable docker executable found for {self.docker!r}")
         log.info("exporting %s from the local docker daemon", ref.name)
+        # Read the daemon's id before the export: if the tag moves while
+        # `docker save` runs, the stored id is the older one and the next
+        # resolve imports the image again, which is the safe direction.
+        daemon_id = self.image_id(ref)
         err = tempfile.TemporaryFile()
         try:
             proc = subprocess.Popen([exe, "save", ref.name], stdout=subprocess.PIPE, stderr=err)
@@ -194,6 +198,7 @@ class DaemonSource:
                 raise PullError(f"docker save {ref.name} failed: {errmsg}")
             if fetch_error is not None:
                 raise fetch_error
+            fetched.daemon_id = daemon_id
             return fetched
         finally:
             err.close()
