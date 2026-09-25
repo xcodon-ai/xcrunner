@@ -1,3 +1,4 @@
+import errno
 import os
 import stat
 from pathlib import Path
@@ -96,3 +97,53 @@ def test_link_tree(tmp_path):
     assert os.stat(tmp_path / "dst/a/b").st_ino == os.stat(src / "a/b").st_ino
     assert os.readlink(tmp_path / "dst/l") == "a/b"
     assert stat.S_IMODE(os.stat(tmp_path / "dst/a").st_mode) == 0o750
+
+
+def test_link_tree_preserves_restrictive_dir_mode(tmp_path):
+    """A 0o500 source dir must not end up widened to 0o700 in the copy."""
+    src = mk(tmp_path / "src2", {"d/f": "x"})
+    os.chmod(src / "d", 0o500)
+    dst_root = tmp_path / "dst2"
+    try:
+        link_tree(src, dst_root)
+        assert stat.S_IMODE(os.stat(dst_root / "d").st_mode) == 0o500
+        assert (dst_root / "d" / "f").read_text() == "x"
+    finally:
+        os.chmod(src / "d", 0o750)
+        os.chmod(dst_root / "d", 0o750)
+
+
+def test_snapshot_upper_preserves_restrictive_dir_mode(tmp_path):
+    """Same guarantee for snapshot_upper: the layer dir keeps the upper dir's exact mode."""
+    upper = mk(tmp_path / "upper2", {"d/f": "x"})
+    os.chmod(upper / "d", 0o500)
+    dest = tmp_path / "layer2"
+    try:
+        snapshot_upper(upper, dest)
+        assert stat.S_IMODE(os.stat(dest / "d").st_mode) == 0o500
+        assert (dest / "d" / "f").read_text() == "x"
+    finally:
+        os.chmod(upper / "d", 0o750)
+        os.chmod(dest / "d", 0o750)
+
+
+def test_place_file_copy_fallback_strips_overlay_xattrs(tmp_path, monkeypatch):
+    """When os.link fails (e.g. EXDEV) and copy2 falls back, overlay bookkeeping must not leak."""
+    from xcodon_runtime import layerdiff
+
+    src = mk(tmp_path / "src3", {"f": "x"})
+    target = src / "f"
+    try:
+        os.setxattr(target, "user.overlay.origin", b"\x00")
+    except OSError:
+        pytest.skip("user xattrs unsupported on this filesystem")
+
+    def fake_link(*args, **kwargs):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(layerdiff.os, "link", fake_link)
+    dst = tmp_path / "dst3" / "f"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    layerdiff._place_file(target, dst)
+    assert dst.read_text() == "x"
+    assert not os.listxattr(dst), "overlay xattrs must not leak through the copy fallback"

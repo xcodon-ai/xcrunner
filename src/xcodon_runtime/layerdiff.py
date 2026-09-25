@@ -37,6 +37,24 @@ def _is_opaque(path: Path) -> bool:
     return False
 
 
+def _strip_overlay_xattrs(path: Path) -> None:
+    """Remove any xattr that ``shutil.copy2`` carried over naming an overlay attribute.
+
+    ``copy2`` copies ``user.*`` xattrs along with the file, which would leak
+    overlayfs bookkeeping (like ``user.overlay.origin``) into the layer.
+    """
+    try:
+        names = os.listxattr(path, follow_symlinks=False)
+    except OSError:
+        return
+    for name in names:
+        if "overlay." in name:
+            try:
+                os.removexattr(path, name, follow_symlinks=False)
+            except OSError:
+                pass
+
+
 def _place_file(src: Path, dst: Path) -> None:
     """Hardlink a regular file into the layer, copying when linking is not possible."""
     try:
@@ -44,14 +62,16 @@ def _place_file(src: Path, dst: Path) -> None:
     except OSError as e:
         if e.errno in (errno.EXDEV, errno.EMLINK, errno.EPERM):
             shutil.copy2(src, dst, follow_symlinks=False)
+            _strip_overlay_xattrs(dst)
         else:
             raise
 
 
 def link_tree(src: Path, dst: Path) -> None:
     """Recreate ``src`` under ``dst``: directories with their mode, symlinks as is, files hardlinked."""
+    mode = stat.S_IMODE(os.lstat(src).st_mode)
     dst.mkdir(parents=True, exist_ok=True)
-    os.chmod(dst, stat.S_IMODE(os.lstat(src).st_mode) | 0o700)
+    os.chmod(dst, 0o700)  # writable while populating; the true mode is restored below
     for entry in sorted(os.scandir(src), key=lambda e: e.name):
         target = dst / entry.name
         if entry.is_symlink():
@@ -60,6 +80,7 @@ def link_tree(src: Path, dst: Path) -> None:
             link_tree(Path(entry.path), target)
         elif entry.is_file(follow_symlinks=False):
             _place_file(Path(entry.path), target)
+    os.chmod(dst, mode)
 
 
 def snapshot_upper(upper: Path, dest: Path) -> int:
@@ -74,13 +95,15 @@ def snapshot_upper(upper: Path, dest: Path) -> int:
             os.symlink(os.readlink(src), target)
             count += 1
         elif stat.S_ISDIR(st.st_mode):
+            mode = stat.S_IMODE(st.st_mode)
             target.mkdir(exist_ok=True)
-            os.chmod(target, stat.S_IMODE(st.st_mode) | 0o700)
+            os.chmod(target, 0o700)  # writable while populating; the true mode is restored below
             count += 1
             if _is_opaque(src):
                 (target / OPAQUE).touch()
                 count += 1
             count += snapshot_upper(src, target)
+            os.chmod(target, mode)
         elif _is_whiteout(st):
             (dest / (WHITEOUT_PREFIX + entry.name)).touch()
             count += 1
@@ -123,6 +146,7 @@ def snapshot_diff(rootfs: Path, base_rootfs: Path, dest: Path) -> int:
         if stat.S_ISDIR(sc.st_mode):
             if sb is not None and not stat.S_ISDIR(sb.st_mode):
                 (dest / (WHITEOUT_PREFIX + name)).touch()
+                count += 1
                 sb = None
             if sb is None:
                 link_tree(cur, target)
@@ -131,7 +155,7 @@ def snapshot_diff(rootfs: Path, base_rootfs: Path, dest: Path) -> int:
             sub = snapshot_diff(cur, base, target)
             if sub or stat.S_IMODE(sc.st_mode) != stat.S_IMODE(sb.st_mode):
                 target.mkdir(exist_ok=True)
-                os.chmod(target, stat.S_IMODE(sc.st_mode) | 0o700)
+                os.chmod(target, stat.S_IMODE(sc.st_mode))
                 count += sub + 1
             elif target.exists():
                 os.rmdir(target)
@@ -140,6 +164,7 @@ def snapshot_diff(rootfs: Path, base_rootfs: Path, dest: Path) -> int:
             continue
         if sb is not None and stat.S_ISDIR(sb.st_mode):
             (dest / (WHITEOUT_PREFIX + name)).touch()
+            count += 1
         if stat.S_ISLNK(sc.st_mode):
             os.symlink(os.readlink(cur), target)
             count += 1
