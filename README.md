@@ -47,6 +47,33 @@ engine, and `--home DIR` picks the state directory for this one command.
 Images already in a local Docker daemon are reused through `docker save`, so
 locally built images work without a registry.
 
+## Build and commit
+
+    xrunner build -t myapp:1 .                          # runs a Dockerfile subset
+    xrunner commit -m "installed numpy" dev myapp:2      # snapshot a stopped container
+    xrunner tag myapp:2 myapp:latest
+
+`xrunner build` runs each Dockerfile instruction in its own container and
+commits one image per step, so unchanged steps are cached. `xrunner commit`
+also works on an `--env-dir` folder instead of a container:
+`xrunner commit --env-dir $PWD/.xrunner-env --image myapp:1 myapp:2`.
+
+For tools that shell out to a real `docker` binary (build systems, CI
+scripts, cwltool's docker path), `xrunner shim install` writes a `docker`
+script that forwards every call to `xrunner docker`:
+
+    xrunner shim install --dir ~/.local/bin
+    export PATH="$HOME/.local/bin:$PATH"
+    docker build -t myapp:1 .
+    docker image inspect myapp:1
+
+The shim refuses to overwrite a real `docker` already on PATH unless you
+pass `--force`. xrunner also never mistakes its own shim for a real Docker
+daemon: image pulls that would reuse a local `docker save` skip a shim.
+
+Limits on the Dockerfile subset: no multi-stage builds (a second `FROM`, or
+`--from=`), no `.dockerignore`, and no remote `ADD`/`COPY` from a URL.
+
 ## Environment variables
 
 | Variable | Meaning |

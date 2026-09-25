@@ -6,7 +6,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -19,6 +18,31 @@ from xcodon_runtime.registry import INDEX_TYPES, FetchedImage, FetchedLayer, sel
 
 log = logging.getLogger(__name__)
 CHUNK = 1 << 20
+
+# Written as the first line of the `docker` shim `xrunner shim install` creates
+# (see cli.py). A resolved `docker` executable that contains this marker is our
+# own shim, not a real docker daemon client, and must never be treated as one:
+# otherwise xrunner would call itself for `docker version` / `docker save`.
+SHIM_MARKER = "# docker shim installed by xrunner"
+
+
+def _is_shim(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return SHIM_MARKER.encode() in f.read(512)
+    except OSError:
+        return False
+
+
+def _resolve_docker(name: str) -> str | None:
+    """Find an executable docker, like shutil.which, but skip an xrunner-installed shim."""
+    candidates = [name] if os.path.isabs(name) else [
+        os.path.join(d, name) for d in os.environ.get("PATH", "").split(os.pathsep) if d
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK) and not _is_shim(candidate):
+            return candidate
+    return None
 
 
 def _store_blob(tar: tarfile.TarFile, member: tarfile.TarInfo, home: RuntimeHome) -> None:
@@ -105,9 +129,14 @@ class DaemonSource:
         self.home = home
         self.docker = docker
 
+    def _exe(self) -> str | None:
+        """The resolved docker executable, or None. Same resolution in every method here,
+        so a shim on PATH is never mistaken for the real thing in one call but not another."""
+        return _resolve_docker(self.docker)
+
     def available(self) -> bool:
-        exe = shutil.which(self.docker) if not os.path.isabs(self.docker) else self.docker
-        if not exe or not os.access(exe, os.X_OK):
+        exe = self._exe()
+        if not exe:
             return False
         try:
             r = subprocess.run([exe, "version", "--format", "{{.Server.Version}}"], capture_output=True, timeout=15)
@@ -116,16 +145,22 @@ class DaemonSource:
         return r.returncode == 0
 
     def has_image(self, ref: Reference) -> bool:
+        exe = self._exe()
+        if not exe:
+            return False
         try:
-            r = subprocess.run([self.docker, "image", "inspect", ref.name], capture_output=True, timeout=30)
+            r = subprocess.run([exe, "image", "inspect", ref.name], capture_output=True, timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             return False
         return r.returncode == 0
 
     def image_id(self, ref: Reference) -> str | None:
         """The daemon's image id for a tag (``sha256:<hex>``), or None if it has no such tag."""
+        exe = self._exe()
+        if not exe:
+            return None
         try:
-            r = subprocess.run([self.docker, "image", "inspect", "--format", "{{.Id}}", ref.name],
+            r = subprocess.run([exe, "image", "inspect", "--format", "{{.Id}}", ref.name],
                                capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -133,10 +168,13 @@ class DaemonSource:
         return out if r.returncode == 0 and out.startswith("sha256:") else None
 
     def fetch(self, ref: Reference, platform: Platform) -> FetchedImage:
+        exe = self._exe()
+        if not exe:
+            raise PullError(f"no usable docker executable found for {self.docker!r}")
         log.info("exporting %s from the local docker daemon", ref.name)
         err = tempfile.TemporaryFile()
         try:
-            proc = subprocess.Popen([self.docker, "save", ref.name], stdout=subprocess.PIPE, stderr=err)
+            proc = subprocess.Popen([exe, "save", ref.name], stdout=subprocess.PIPE, stderr=err)
             assert proc.stdout is not None
             fetch_error: Exception | None = None
             try:

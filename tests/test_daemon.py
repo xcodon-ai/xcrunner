@@ -130,6 +130,23 @@ def test_daemon_source_unavailable_when_missing(home):
     assert not DaemonSource(home, docker="/nonexistent/docker").available()
 
 
+def test_daemon_source_unavailable_when_only_shim_on_path(home, tmp_path, monkeypatch):
+    """A `docker` that is really xrunner's own shim must never look "available":
+    otherwise xrunner would call itself for `docker version`/`docker save`."""
+    shim_dir = tmp_path / "shimonly"
+    shim_dir.mkdir()
+    shim = shim_dir / "docker"
+    shim.write_text("#!/bin/sh\n# docker shim installed by xrunner\nexit 1\n")
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(shim_dir))
+
+    def _forbidden(*a, **k):
+        raise AssertionError("available() must not run anything when only a shim is on PATH")
+
+    monkeypatch.setattr("subprocess.run", _forbidden)
+    assert not DaemonSource(home).available()
+
+
 def test_daemon_source_has_image_returns_false_when_docker_missing(home):
     src = DaemonSource(home, docker="/nonexistent/docker")
     assert not src.has_image(Reference("docker.io", "library/x", "latest"))

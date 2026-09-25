@@ -7,12 +7,17 @@ import csv
 import json
 import logging
 import os
+import shlex
+import shutil
+import stat
 import sys
 from dataclasses import dataclass, field
 from io import StringIO
+from pathlib import Path
 
 from xcodon_runtime import __version__
 from xcodon_runtime.api import Runtime
+from xcodon_runtime.daemon import SHIM_MARKER
 from xcodon_runtime.engine import Bind
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.keeper import KEEPER_LOG
@@ -172,7 +177,13 @@ _GLOBAL_OPTIONS_WITH_VALUE = {"--engine", "--home"}
 
 def _split_argv(argv: list[str]) -> tuple[list[str], list[str] | None]:
     """Split at a `run` or `create` subcommand. argparse's REMAINDER rejects leading options,
-    and a global `-v` must not swallow a `-v` inside the container command."""
+    and a global `-v` must not swallow a `-v` inside the container command.
+
+    `docker` is transparent: `docker run`/`docker create` split the same way, one token
+    later. Any other verb after `docker` is left whole (`(argv, None)`) for `main` to
+    carve up itself, since a docker verb's own flags (`docker image inspect --format ...`)
+    must not be mistaken for xrunner's global options either.
+    """
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -182,10 +193,85 @@ def _split_argv(argv: list[str]) -> tuple[list[str], list[str] | None]:
         if tok.startswith("-"):
             i += 1
             continue
+        if tok == "docker":
+            if i + 1 < len(argv) and argv[i + 1] in ("run", "create"):
+                return argv[: i + 2], argv[i + 2 :]
+            return argv, None
         if tok in ("run", "create"):
             return argv[: i + 1], argv[i + 1 :]
         return argv, None
     return argv, None
+
+
+def _split_at_docker(head: list[str]) -> tuple[list[str], list[str]] | None:
+    """Where in `head` (already split by `_split_argv`) the `docker` verb sits, skipping
+    global options the same way `_split_argv` does. None when `head` is not a docker
+    invocation at all. Used by `main` to carve the docker verb's own argv (build flags,
+    image inspect flags, ...) away from xrunner's own argparse parser."""
+    i = 0
+    while i < len(head):
+        tok = head[i]
+        if tok in _GLOBAL_OPTIONS_WITH_VALUE:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        if tok == "docker":
+            return head[: i + 1], head[i + 1 :]
+        return None
+    return None
+
+
+# SHIM_NAME is the file `xrunner shim install` writes: a `docker` that forwards to
+# `xrunner docker`, so tools that shell out to a real docker binary (build, image
+# inspect, ...) work on a host that has no docker at all.
+SHIM_NAME = "docker"
+
+# Maps a docker verb to the xrunner verb (as argv) that implements it.
+DOCKER_VERBS = {
+    "build": ["build"], "pull": ["pull"], "images": ["images"], "rmi": ["rmi"], "tag": ["tag"],
+    "run": ["run"], "create": ["create"], "start": ["start"], "exec": ["exec"], "stop": ["stop"],
+    "rm": ["rm"], "ps": ["ps"], "logs": ["logs"], "commit": ["commit"], "inspect": ["inspect"],
+    "version": ["info"], "info": ["info"],
+}
+# `docker image <verb>` has its own, smaller, vocabulary.
+DOCKER_IMAGE_VERBS = {"inspect": ["inspect"], "ls": ["images"], "list": ["images"], "rm": ["rmi"], "remove": ["rmi"]}
+# `docker ... inspect` flags xrunner ignores: our inspect always prints the full JSON list.
+_INSPECT_DROP = {"--format", "-f", "--type"}
+
+
+def translate_docker_argv(argv: list[str]) -> list[str]:
+    """Map a docker CLI invocation's argv (verb + its own args, no leading `docker`) to
+    xrunner's. Raises UsageError for a verb xrunner does not offer."""
+    if not argv:
+        raise UsageError("docker: a verb is required (build, image inspect, run, ...)")
+    verb, rest = argv[0], list(argv[1:])
+    if verb == "image":
+        if not rest or rest[0] not in DOCKER_IMAGE_VERBS:
+            raise UsageError(f"docker image {rest[:1]}: not supported by xrunner")
+        head = DOCKER_IMAGE_VERBS[rest[0]]
+        rest = rest[1:]
+        verb = "inspect" if head == ["inspect"] else head[0]
+    elif verb in DOCKER_VERBS:
+        head = DOCKER_VERBS[verb]
+    else:
+        raise UsageError(f"docker {verb}: not supported by xrunner")
+    if verb == "inspect":
+        cleaned = []
+        skip = False
+        for tok in rest:
+            if skip:
+                skip = False
+                continue
+            if tok in _INSPECT_DROP:
+                skip = True
+                continue
+            if tok.startswith("--format=") or tok.startswith("--type="):
+                continue
+            cleaned.append(tok)
+        rest = cleaned
+    return head + rest
 
 
 def _warn_ignored(opts: RunOptions) -> None:
@@ -206,7 +292,10 @@ def cmd_pull(rt: Runtime, args) -> int:
 def cmd_inspect(rt: Runtime, args) -> int:
     doc = rt.images.inspect(args.image)
     print(json.dumps(doc, indent=2))
-    return 0 if doc else 1
+    if not doc:
+        print(f"Error: No such image: {args.image}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_images(rt: Runtime, args) -> int:
@@ -303,6 +392,116 @@ def cmd_prune(rt: Runtime, args) -> int:
     return 0
 
 
+def cmd_build(rt: Runtime, args) -> int:
+    build_args = {}
+    for item in args.build_arg or []:
+        k, has_eq, v = item.partition("=")
+        build_args[k] = v if has_eq else os.environ.get(k, "")
+    out = (lambda line: None) if args.quiet else (lambda line: print(line, flush=True))
+    img = rt.build(args.context, dockerfile=args.file, tags=args.tag or [], build_args=build_args,
+                   no_cache=args.no_cache, out=out)
+    if args.quiet:
+        print(f"sha256:{img.id}")
+    return 0
+
+
+def _image_env_scope(img) -> dict[str, str]:
+    """The image's own Env, as a mapping, for expanding `$VAR` in a `commit -c` change."""
+    scope: dict[str, str] = {}
+    for item in img.config.get("config", {}).get("Env") or []:
+        k, _, v = item.partition("=")
+        scope[k] = v
+    return scope
+
+
+def _parse_change(spec: str, scope: dict[str, str]) -> dict:
+    from xcodon_runtime.build import DEFAULT_SHELL, parse_command, parse_env
+
+    name, _, rest = spec.strip().partition(" ")
+    name = name.upper()
+    if name == "ENV":
+        return {"Env": [f"{k}={v}" for k, v in parse_env(rest, scope).items()]}
+    if name == "LABEL":
+        return {"Labels": parse_env(rest, scope)}
+    if name == "WORKDIR":
+        return {"WorkingDir": rest.strip()}
+    if name == "USER":
+        return {"User": rest.strip()}
+    if name in ("CMD", "ENTRYPOINT"):
+        return {"Cmd" if name == "CMD" else "Entrypoint": parse_command(rest, DEFAULT_SHELL)}
+    if name == "SHELL":
+        return {"Shell": parse_command(rest, DEFAULT_SHELL)}
+    raise UsageError(f"unsupported --change {spec!r}; use ENV, LABEL, WORKDIR, USER, CMD, ENTRYPOINT, or SHELL")
+
+
+def cmd_commit(rt: Runtime, args) -> int:
+    # `commit --env-dir D --image I TAG` has only one positional: argparse fills the
+    # first declared positional (container) with it, leaving tag None. Shift it over.
+    if args.env_dir and args.tag is None:
+        args.tag, args.container = args.container, None
+    container = None
+    if args.env_dir:
+        if not args.image:
+            raise UsageError("commit --env-dir also needs --image IMAGE")
+        base = rt.images.require(args.image)
+    else:
+        if not args.container:
+            raise UsageError("commit needs a CONTAINER, or --env-dir DIR --image IMAGE")
+        container = rt.get_container(args.container)
+        base = rt.images.require(container.image_id)
+    scope = _image_env_scope(base)
+    changes: dict = {}
+    for spec in args.change or []:
+        for k, v in _parse_change(spec, scope).items():
+            if k == "Env":
+                changes.setdefault("Env", []).extend(v)
+            elif k == "Labels":
+                changes.setdefault("Labels", {}).update(v)
+            else:
+                changes[k] = v
+    if args.env_dir:
+        img = rt.commit(None, args.tag, env_dir=os.path.abspath(os.path.expanduser(args.env_dir)),
+                         image=args.image, changes=changes, message=args.message or "")
+    else:
+        img = rt.commit(container, args.tag, changes=changes, message=args.message or "")
+    print(f"sha256:{img.id}")
+    return 0
+
+
+def cmd_tag(rt: Runtime, args) -> int:
+    rt.images.tag(args.source, args.target)
+    return 0
+
+
+def cmd_docker(rt: Runtime, args) -> int:
+    translated = translate_docker_argv(list(args.rest))
+    return main(translated, _runtime=rt)
+
+
+def cmd_shim(rt: Runtime, args) -> int:
+    target_dir = Path(args.dir or os.path.dirname(sys.executable)).expanduser().resolve()
+    existing = shutil.which(SHIM_NAME)
+    if existing and not args.force:
+        try:
+            is_ours = SHIM_MARKER in Path(existing).read_text(errors="ignore")
+        except OSError:
+            is_ours = False
+        if not is_ours:
+            raise UsageError(f"a real docker is on PATH at {existing}; pass --force to install the shim anyway")
+    xrunner = os.path.join(os.path.dirname(sys.executable), "xrunner")
+    if not os.access(xrunner, os.X_OK):
+        xrunner = shutil.which("xrunner") or "xrunner"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shim = target_dir / SHIM_NAME
+    shim.write_text(f"#!/bin/sh\n{SHIM_MARKER}\nexec {shlex.quote(xrunner)} docker \"$@\"\n")
+    mode = shim.stat().st_mode
+    shim.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    print(f"installed {shim}")
+    if str(target_dir) not in os.environ.get("PATH", "").split(os.pathsep):
+        print(f'add it to PATH: export PATH="{target_dir}:$PATH"')
+    return 0
+
+
 # -- parser --------------------------------------------------------------------------
 
 
@@ -369,6 +568,59 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-a", "--all", action="store_true",
                    help="also remove unreferenced layers and exited containers older than a day")
     s.set_defaults(func=cmd_prune)
+
+    s = sub.add_parser("build", help="build an image from a Dockerfile subset")
+    s.add_argument("-t", "--tag", action="append")
+    s.add_argument("-f", "--file")
+    s.add_argument("--build-arg", action="append")
+    s.add_argument("--no-cache", action="store_true")
+    s.add_argument("-q", "--quiet", action="store_true")
+    # Flags docker build accepts that xrunner ignores. Booleans take no value; --rm/
+    # --force-rm/--pull must NOT be nargs="?", or `build --rm CTX` would swallow CTX
+    # as --rm's own optional argument instead of leaving it for the context positional.
+    s.add_argument("--rm", action="store_true", help=argparse.SUPPRESS)
+    s.add_argument("--force-rm", action="store_true", help=argparse.SUPPRESS)
+    s.add_argument("--pull", action="store_true", help=argparse.SUPPRESS)
+    s.add_argument("--progress", help=argparse.SUPPRESS)
+    s.add_argument("--platform", help=argparse.SUPPRESS)
+    s.add_argument("--network", help=argparse.SUPPRESS)
+    s.add_argument("--label", action="append", help=argparse.SUPPRESS)
+    s.add_argument("context")
+    s.set_defaults(func=cmd_build)
+
+    s = sub.add_parser("commit", help="snapshot a stopped container or an env folder layer as an image")
+    s.add_argument("-m", "--message")
+    s.add_argument("-c", "--change", action="append")
+    s.add_argument("--env-dir")
+    s.add_argument("--image")
+    s.add_argument("container", nargs="?")
+    s.add_argument("tag", nargs="?")
+    s.set_defaults(func=cmd_commit)
+
+    s = sub.add_parser("tag", help="add a tag to an image")
+    s.add_argument("source")
+    s.add_argument("target")
+    s.set_defaults(func=cmd_tag)
+
+    s = sub.add_parser("image", help="docker-style image commands")
+    isub = s.add_subparsers(dest="image_cmd", required=True)
+    i = isub.add_parser("inspect")
+    i.add_argument("image")
+    i.set_defaults(func=cmd_inspect)
+    isub.add_parser("ls").set_defaults(func=cmd_images)
+    i = isub.add_parser("rm")
+    i.add_argument("image")
+    i.set_defaults(func=cmd_rmi)
+
+    s = sub.add_parser("docker", help="accept docker verbs (build, image inspect, run, ...)", add_help=False)
+    s.set_defaults(func=cmd_docker, rest=[])
+
+    s = sub.add_parser("shim", help="install a docker command that forwards to xrunner")
+    ssub = s.add_subparsers(dest="shim_cmd", required=True)
+    i = ssub.add_parser("install", help="write a docker script that forwards to `xrunner docker`")
+    i.add_argument("--dir", help="where to write it (default: beside the xrunner executable)")
+    i.add_argument("--force", action="store_true", help="overwrite even if a real docker is already on PATH")
+    i.set_defaults(func=cmd_shim)
     return p
 
 
@@ -383,18 +635,31 @@ def _configure_logging(verbosity: int) -> None:
                         force=True)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, _runtime: Runtime | None = None) -> int:
+    """`_runtime` lets `cmd_docker` re-enter `main` with the same Runtime (and so the
+    same --engine/--home) after translating a docker invocation to an xrunner one."""
     parser = build_parser()
     head, rest = _split_argv(list(sys.argv[1:] if argv is None else argv))
+    # `docker ...` (any verb but run/create) comes back from `_split_argv` as (argv,
+    # None): pull the docker verb's own argv out here, before argparse ever sees it,
+    # the same way run/create's are carved out above.
+    docker_split = _split_at_docker(head)
+    if docker_split is not None:
+        prefix, after = docker_split
+        docker_rest = after + (rest or [])
+        head = prefix
+        rest = None
     try:
         args = parser.parse_args(head)
     except SystemExit as e:
         return int(e.code or 0)
-    if rest is not None:
+    if docker_split is not None:
+        args.rest = docker_rest
+    elif rest is not None:
         args.rest = rest
     _configure_logging(args.verbose)
     try:
-        rt = Runtime(args.home, engine=args.engine)
+        rt = _runtime if _runtime is not None else Runtime(args.home, engine=args.engine)
         return args.func(rt, args)
     except XcodonError as e:
         print(f"xrunner: {e}", file=sys.stderr)
