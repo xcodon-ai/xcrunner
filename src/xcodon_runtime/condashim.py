@@ -49,6 +49,37 @@ Environments live in the project's .xrunner-env/conda folder.
 """
 ACTIVATE_MSG = ("conda {verb}: activation changes the calling shell, which xrunner's conda cannot do.\n"
                 "Run a tool with `conda run -n NAME CMD`, or call it as <prefix>/bin/CMD.")
+# Options micromamba accepts ahead of the verb (spec 12.5: `conda -r ROOT run ...`,
+# `conda -q run ...`) that take a separate value, so the pre-verb scan below can
+# skip past it without mistaking it for the verb.
+_PRE_VERB_VALUE_OPTS = ("-r", "--root-prefix", "--rc-file")
+
+
+def _split_before_run(argv: Sequence[str]) -> tuple[list[str], list[str]] | None:
+    """If the first non-option token in argv is `run`, the option tokens (with
+    their values) before it and the tokens after it; else None.
+
+    `run` is otherwise dispatched only when it is argv[0], which rejects
+    `conda -r ROOT run ...` and `conda -q run ...` even though options are
+    allowed before the verb. `parse_run_args` already reads `-r`, `-q` and
+    `--no-rc`, so those tokens are simply forwarded to it unchanged.
+    """
+    tokens = list(argv)
+    before: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            return (before, tokens[i + 1:]) if tok == "run" else None
+        opt = tok.split("=", 1)[0] if tok.startswith("--") else (tok[:2] if len(tok) > 1 else tok)
+        if opt in _PRE_VERB_VALUE_OPTS:
+            j = i
+            _, i = opt_value(tokens, i)
+            before.extend(tokens[j:i])
+        else:
+            before.append(tok)
+            i += 1
+    return None
 
 
 @dataclass
@@ -210,10 +241,12 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
     environ = dict(os.environ if environ is None else environ)
     err = err if err is not None else sys.stderr
     argv = list(argv)
-    if argv[:1] == ["run"]:
+    split = _split_before_run(argv)
+    if split is not None:
         from xcodon_runtime.condarun import run_main
 
-        return run_main(argv[1:], home, cwd, environ, err)
+        before, after = split
+        return run_main(before + after, home, cwd, environ, err)
     p = parse_args(argv)
     if p.version:
         print(f"conda {_micromamba_version(find_micromamba(home, environ))} (micromamba via xrunner)")

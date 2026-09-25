@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,14 @@ from xcodon_runtime.home import RuntimeHome
 _VALUE_OPTS = ("-n", "--name", "-p", "--prefix", "-r", "--root-prefix", "--cwd")
 _IGNORED = frozenset({"--no-capture-output", "--live-stream", "-v", "--verbose", "--dev",
                       "--debug-wrapper-scripts", "-q", "--quiet", "--no-rc"})
+_HELP_OPTS = frozenset({"-h", "--help"})
+
+RUN_USAGE = """usage: conda run [-n NAME | -p PATH] [-r ROOT] [--cwd DIR] COMMAND [ARG...]
+
+Runs COMMAND inside the conda environment: xrunner activates the environment
+itself and execs COMMAND, replacing this process. COMMAND's exit status,
+stdout, stderr and stdin are used as-is.
+"""
 
 
 class RunUsageError(ValueError):
@@ -34,6 +43,7 @@ class RunArgs:
     prefix: str | None = None
     root_flag: str | None = None
     cwd: str | None = None
+    help: bool = False
     command: list[str] = field(default_factory=list)
 
 
@@ -60,6 +70,8 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
             if value is None:
                 raise RunUsageError(f"{opt} needs a value")
             if opt in ("-n", "--name"):
+                if "/" in value or value in (".", ".."):
+                    raise RunUsageError(f"invalid environment name '{value}'")
                 a.name = value
             elif opt in ("-p", "--prefix"):
                 a.prefix = value
@@ -68,6 +80,10 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
             else:
                 a.cwd = value
             continue
+        if tok in _HELP_OPTS:
+            a.help = True
+            i += 1
+            continue
         if tok in _IGNORED:
             i += 1
             continue
@@ -75,12 +91,17 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
             raise RunUsageError(f"unknown option {tok}")
         break
     a.command = tokens[i:]
+    if a.name and a.prefix:
+        raise RunUsageError("use -n NAME or -p PATH, not both")
     return a
 
 
 def activation_env(prefix: Path, label: str, environ: Mapping[str, str]) -> dict[str, str]:
     env = dict(environ)
-    env["PATH"] = str(prefix / "bin") + (os.pathsep + env["PATH"] if env.get("PATH") else "")
+    # A missing or empty PATH would leave the command only able to see the
+    # env's own bin/, unable to find `sh` or any other ordinary tool.
+    existing_path = env.get("PATH") or os.defpath
+    env["PATH"] = str(prefix / "bin") + os.pathsep + existing_path
     env["CONDA_PREFIX"] = str(prefix)
     env["CONDA_DEFAULT_ENV"] = label
     env["CONDA_SHLVL"] = "1"
@@ -94,6 +115,9 @@ def run_main(argv: Sequence[str], home: RuntimeHome, cwd: Path, environ: Mapping
     except RunUsageError as e:
         print(f"conda run: {e}", file=err)
         return 2
+    if a.help:
+        print(RUN_USAGE, end="")
+        return 0
     if not a.command:
         print("conda run: a command is required, for example: conda run -n NAME COMMAND", file=err)
         return 2
@@ -126,6 +150,18 @@ def run_main(argv: Sequence[str], home: RuntimeHome, cwd: Path, environ: Mapping
         return 1
     sys.stdout.flush()
     sys.stderr.flush()
+    # Python sets SIGPIPE and SIGXFSZ to SIG_IGN at startup, and exec keeps
+    # ignored dispositions, so an unpatched command inherits an ignored
+    # SIGPIPE: `conda run ... | head` then gets a "Broken pipe" write error
+    # and exits 1 instead of dying quietly with 141, breaking `pipefail`.
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError, OSError):
+        pass
+    try:
+        signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+    except (AttributeError, ValueError, OSError):
+        pass
     try:
         os.execvpe(argv_exec[0], argv_exec, env)
     except FileNotFoundError:

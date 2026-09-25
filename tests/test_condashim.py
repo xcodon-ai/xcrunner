@@ -6,7 +6,7 @@ import pytest
 from tests.fake_micromamba import make_fake_micromamba, read_log
 from xcodon_runtime import cli
 from xcodon_runtime.condaroot import ensure_root, lookup_root, opt_value, resolve_root
-from xcodon_runtime.condashim import conda_main, parse_args
+from xcodon_runtime.condashim import _split_before_run, conda_main, parse_args
 from xcodon_runtime.micromamba import MicromambaMissing
 
 
@@ -56,6 +56,19 @@ def test_parse_args():
     assert (p.verb, p.sub, p.prefix, p.root_flag, p.key) == ("env", "export", "x", "/root2", "env export")
     assert "-r" not in p.tokens and "/root2" not in p.tokens
     assert parse_args(["--version"]).version and parse_args(["-h"]).help
+
+
+def test_split_before_run_finds_run_after_leading_options():
+    assert _split_before_run(["run", "-n", "x", "tool"]) == ([], ["-n", "x", "tool"])
+    assert _split_before_run(["-r", "/root", "run", "-n", "x", "tool"]) == (
+        ["-r", "/root"], ["-n", "x", "tool"])
+    assert _split_before_run(["-q", "run", "tool"]) == (["-q"], ["tool"])
+    assert _split_before_run(["-rroot", "run", "tool"]) == (["-rroot"], ["tool"])
+    assert _split_before_run(["--root-prefix=/root", "run", "tool"]) == (
+        ["--root-prefix=/root"], ["tool"])
+    assert _split_before_run(["create", "-n", "x"]) is None
+    assert _split_before_run(["-y", "create", "-n", "x"]) is None
+    assert _split_before_run([]) is None
 
 
 def test_create_runs_micromamba_with_isolated_settings(home, project, fake):
