@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 
 import pytest
@@ -360,3 +361,153 @@ def test_unknown_instruction_fails_before_any_step_runs(rt, tmp_path):
     with pytest.raises(XcodonError, match="line 2"):
         rt.build(ctx)
     assert rt.containers(all=True) == []
+
+
+# -- round 2: directory merges must not crash on overlapping names (A) ------
+
+def test_copy_merges_directories_with_overlapping_names(rt, tmp_path):
+    ctx = tmp_path / "ctx-mergedirs"
+    ctx.mkdir()
+    (ctx / "src" / "data").mkdir(parents=True)
+    (ctx / "src" / "data" / "a.txt").write_text("A")
+    (ctx / "src" / "data" / "common.txt").write_text("first")
+    (ctx / "tests" / "data").mkdir(parents=True)
+    (ctx / "tests" / "data" / "b.txt").write_text("B")
+    (ctx / "tests" / "data" / "common.txt").write_text("second")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY src/ tests/ /app/\n")
+    built = rt.build(ctx)
+    assert (built.rootfs / "app/data/a.txt").read_text() == "A"
+    assert (built.rootfs / "app/data/b.txt").read_text() == "B"
+    # a later source's file replaces an earlier one of the same name
+    assert (built.rootfs / "app/data/common.txt").read_text() == "second"
+
+
+# -- round 2: guest destinations are normalized and clamped at / (B) --------
+
+def test_copy_dest_dotdot_is_clamped_to_root(rt, tmp_path, home):
+    ctx = tmp_path / "ctx-dotdot-dest"
+    ctx.mkdir()
+    (ctx / "f").write_text("x")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nWORKDIR /workspace\nCOPY f ../../../x\n")
+    built = rt.build(ctx)
+    assert (built.rootfs / "x").read_text() == "x"
+    # nothing escaped onto the host: the runtime home itself must be untouched
+    assert not (home.path / "x").exists()
+
+
+# -- round 2: destinations that are symlinks in the image (C) --------------
+
+def test_copy_into_symlinked_bin_preserves_the_link(rt, tmp_path, home):
+    from tests.conftest import build_busybox_rootfs, pack_rootfs_as_image
+
+    root = build_busybox_rootfs(tmp_path / "mergedusr")
+    (root / "usr").mkdir()
+    shutil.move(str(root / "bin"), str(root / "usr" / "bin"))
+    (root / "bin").symlink_to("usr/bin")
+    pack_rootfs_as_image(home, root, "xcodon-test/mergedusr:latest")
+
+    ctx = tmp_path / "ctx-mergedusr"
+    ctx.mkdir()
+    (ctx / "tool").write_text("hi")
+    (ctx / "Dockerfile").write_text(
+        "FROM xcodon-test/mergedusr\nCOPY tool /bin/\nRUN echo via-symlink > /out\n"
+    )
+    built = rt.build(ctx)
+    assert (built.rootfs / "usr" / "bin" / "tool").read_text() == "hi"
+    assert built.rootfs.joinpath("bin").is_symlink()
+    assert os.readlink(built.rootfs / "bin") == "usr/bin"
+    assert (built.rootfs / "out").read_text() == "via-symlink\n"
+
+
+def test_copy_dest_through_absolute_symlink_stays_inside_rootfs(rt, tmp_path, home):
+    from tests.conftest import build_busybox_rootfs, pack_rootfs_as_image
+
+    root = build_busybox_rootfs(tmp_path / "abssym")
+    (root / "run").mkdir()
+    (root / "var").mkdir()
+    (root / "var" / "run").symlink_to("/run")  # absolute target
+    pack_rootfs_as_image(home, root, "xcodon-test/abssym:latest")
+
+    ctx = tmp_path / "ctx-abssym"
+    ctx.mkdir()
+    (ctx / "f").write_text("hi")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/abssym\nCOPY f /var/run/f\n")
+    built = rt.build(ctx)
+    # An absolute symlink target is re-rooted at the image's own rootfs, so
+    # this must land at <rootfs>/run/f, never the host's real /run.
+    assert (built.rootfs / "run" / "f").read_text() == "hi"
+
+
+# -- round 2: ENV/LABEL/COPY split into words before expanding (E) ----------
+
+def test_env_word_split_before_expand_keeps_multiword_value_together(rt, tmp_path):
+    ctx = tmp_path / "ctx-envsplit"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text('FROM xcodon-test/busybox\nARG P="a b"\nENV P=$P\n')
+    built = rt.build(ctx)
+    assert "P=a b" in built.config["config"]["Env"]
+
+
+def test_env_value_with_apostrophe_in_double_quotes_does_not_raise(rt, tmp_path):
+    ctx = tmp_path / "ctx-apostrophe"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nENV GREETING=\"it's fine\"\n")
+    built = rt.build(ctx)
+    assert "GREETING=it's fine" in built.config["config"]["Env"]
+
+
+def test_copy_dest_expands_arg_after_split(rt, tmp_path):
+    ctx = tmp_path / "ctx-copyexpand"
+    ctx.mkdir()
+    (ctx / "f").write_text("hi")
+    (ctx / "Dockerfile").write_text('FROM xcodon-test/busybox\nARG D=/dest\nCOPY f $D/f\n')
+    built = rt.build(ctx)
+    assert (built.rootfs / "dest" / "f").read_text() == "hi"
+
+
+# -- round 2: source directory mode set after contents are placed (F) ------
+
+def test_copy_dir_source_with_read_only_mode_and_file(rt, tmp_path):
+    ctx = tmp_path / "ctx-ro-dir"
+    ctx.mkdir()
+    src = ctx / "ro"
+    src.mkdir()
+    (src / "f").write_text("data")
+    os.chmod(src, 0o555)
+    try:
+        (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY ro /dest/\n")
+        # The regression: chmod'ing the layer's "dest" directory to 0o555
+        # *before* copying "f" into it made the copy itself fail with
+        # PermissionError. Deferring the chmod until after the content is in
+        # place is the fix; this must complete without raising.
+        built = rt.build(ctx)
+        assert (built.rootfs / "dest" / "f").read_text() == "data"
+        # build_rootfs's own layer-apply step ORs in 0o700 on every directory
+        # it applies (flatten.py's _apply_dir, unrelated to this fix, and
+        # never restored back down), so 0o555 survives as 0o555 | 0o700 =
+        # 0o755 in the finished image -- not bit-for-bit 0o555.
+        assert stat.S_IMODE(os.lstat(built.rootfs / "dest").st_mode) == 0o755
+    finally:
+        os.chmod(src, 0o755)
+
+
+# -- round 2: single quotes and ${X:+word} (H) ------------------------------
+
+def test_arg_single_quotes_keep_dollar_literal(rt, tmp_path):
+    ctx = tmp_path / "ctx-singlequote"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nARG X='$HOME'\nLABEL literal=$X\n")
+    built = rt.build(ctx)
+    assert built.config["config"]["Labels"]["literal"] == "$HOME"
+
+
+def test_colon_plus_expansion(rt, tmp_path):
+    ctx = tmp_path / "ctx-colonplus"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text(
+        "FROM xcodon-test/busybox\nARG X=set\nLABEL present=${X:+yes}\nLABEL absent=${Y:+yes}\n"
+    )
+    built = rt.build(ctx)
+    labels = built.config["config"]["Labels"]
+    assert labels["present"] == "yes"
+    assert labels["absent"] == ""
