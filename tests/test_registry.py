@@ -104,6 +104,52 @@ def test_missing_manifest_is_pull_error(home, reg):
         RegistryClient(home, scheme="http").fetch(Reference(reg.host, "lib/none", "latest"), Platform())
 
 
+@pytest.fixture
+def hub(reg, monkeypatch):
+    """Make the fake registry stand in for Docker Hub's API host."""
+    monkeypatch.setattr("xcodon_runtime.reference.DOCKER_HUB_API", reg.host)
+    return reg
+
+
+HUB_HINT = (r"image docker\.io/library/coala-runtime-python:latest was not found on Docker Hub, or it needs a login; "
+            r"if it is a local name, import it first, for example: "
+            r"xrunner pull OTHER/coala-runtime-python:latest && "
+            r"xrunner tag OTHER/coala-runtime-python:latest coala-runtime-python:latest")
+
+
+def test_docker_hub_manifest_401_explains_local_names(home, hub):
+    hub.issued_token = "anonymous-token-the-repo-refuses"
+    ref = Reference("docker.io", "library/coala-runtime-python", "latest")
+    with pytest.raises(PullError, match=HUB_HINT):
+        RegistryClient(home, scheme="http").fetch(ref, Platform())
+
+
+def test_docker_hub_manifest_404_explains_local_names(home, hub):
+    ref = Reference("docker.io", "library/coala-runtime-python", "latest")
+    with pytest.raises(PullError, match=HUB_HINT):
+        RegistryClient(home, scheme="http").fetch(ref, Platform())
+
+
+@pytest.mark.parametrize("status", [401, 404])
+def test_docker_hub_token_failure_explains_local_names(home, hub, status):
+    hub.token_status = status
+    ref = Reference("docker.io", "library/coala-runtime-python", "latest")
+    with pytest.raises(PullError, match=HUB_HINT):
+        RegistryClient(home, scheme="http").fetch(ref, Platform())
+
+
+def test_docker_hub_user_repo_hint_keeps_the_namespace(home, hub):
+    ref = Reference("docker.io", "someone/tool", "v1")
+    with pytest.raises(PullError, match=r"xrunner tag OTHER/tool:v1 someone/tool:v1"):
+        RegistryClient(home, scheme="http").fetch(ref, Platform())
+
+
+def test_other_registry_404_keeps_the_plain_error(home, reg):
+    with pytest.raises(PullError) as info:
+        RegistryClient(home, scheme="http").fetch(Reference(reg.host, "lib/none", "latest"), Platform())
+    assert "HTTP 404" in str(info.value) and "Docker Hub" not in str(info.value)
+
+
 def test_select_platform_variant_rules():
     manifests = [
         {"digest": "sha256:" + "a" * 64, "platform": {"os": "linux", "architecture": "arm64", "variant": "v8"}},

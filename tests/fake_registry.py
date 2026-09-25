@@ -23,6 +23,10 @@ class FakeRegistry:
         self.manifests: dict[tuple[str, str], tuple[bytes, str]] = {}  # (repo, ref) -> (body, media type)
         self.requests: list[tuple[str, str, dict]] = []
         self.token = "test-token"
+        # What /token hands out, when it should differ from the accepted token
+        # (Docker Hub gives an anonymous token that a missing repo still refuses).
+        self.issued_token: str | None = None
+        self.token_status = 200  # set to 401/404 to make /token itself fail
         self.truncate: set[str] = set()  # digests to serve half of, while still declaring the full length
 
     def add_image(self, repo: str, tag: str, config: dict, layers: list[bytes], multi_arch: bool = False) -> str:
@@ -94,7 +98,10 @@ class FakeRegistry:
             def do_GET(self):
                 reg.requests.append(("api", self.path, dict(self.headers)))
                 if self.path.startswith("/token"):
-                    body = json.dumps({"token": reg.token}).encode()
+                    if reg.token_status != 200:
+                        self.send_error(reg.token_status)
+                        return
+                    body = json.dumps({"token": reg.issued_token or reg.token}).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))

@@ -16,7 +16,7 @@ from urllib.parse import urlencode, urlparse
 
 from xcodon_runtime.errors import PullError
 from xcodon_runtime.home import RuntimeHome
-from xcodon_runtime.reference import Platform, Reference
+from xcodon_runtime.reference import DEFAULT_REGISTRY, Platform, Reference
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +65,23 @@ def select_platform(manifests: list[dict], platform: Platform) -> str:
     raise PullError(f"no manifest for {platform}; available: {available}")
 
 
+def _hub_not_found(ref: Reference) -> PullError:
+    """The error for a Docker Hub 401/404 on a manifest or its token.
+
+    Docker Hub answers 401 for a repository that does not exist, the same as
+    for a private one. On a host without docker, a name that only a local
+    daemon ever had (for example a locally built base image) lands here.
+    """
+    short = ref.repository.removeprefix("library/")
+    tag = ref.tag or "latest"
+    return PullError(
+        f"image {ref.registry}/{ref.repository}:{tag} was not found on Docker Hub, or it needs a login; "
+        f"if it is a local name, import it first, for example: "
+        f"xrunner pull OTHER/{short.rsplit('/', 1)[-1]}:{tag} && "
+        f"xrunner tag OTHER/{short.rsplit('/', 1)[-1]}:{tag} {short}:{tag}"
+    )
+
+
 class _StripAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
     """Registries redirect blob downloads to object storage that rejects our bearer token."""
 
@@ -93,7 +110,7 @@ class RegistryClient:
             req.add_header("Authorization", f"Bearer {token}")
         return self._opener.open(req, timeout=self.timeout)
 
-    def _fetch_token(self, challenge: str) -> str:
+    def _fetch_token(self, challenge: str, ref: Reference | None = None) -> str:
         scheme, _, params = challenge.partition(" ")
         if scheme.lower() != "bearer":
             raise PullError(f"unsupported auth scheme {scheme!r}; only anonymous bearer tokens are supported")
@@ -107,6 +124,8 @@ class RegistryClient:
                 data = json.load(r)
         except urllib.error.HTTPError as e:
             e.close()
+            if ref is not None and ref.registry == DEFAULT_REGISTRY and e.code in (401, 404):
+                raise _hub_not_found(ref) from e
             raise PullError(f"token request failed: HTTP {e.code} from {url}") from e
         except urllib.error.URLError as e:
             raise PullError(f"token request failed: {e.reason}") from e
@@ -119,20 +138,27 @@ class RegistryClient:
         url = f"{self.scheme}://{ref.api_host}/v2/{ref.repository}/{path}"
         headers = {"Accept": accept} if accept else {}
         key = (ref.api_host, ref.repository)
+        # Only a manifest (or its token) miss on Docker Hub gets the "not
+        # found, or needs a login" hint; a blob error is a different problem.
+        hub_manifest = ref.registry == DEFAULT_REGISTRY and path.startswith("manifests/")
         try:
             return self._open(url, headers, self._tokens.get(key))
         except urllib.error.HTTPError as e:
             challenge = e.headers.get("WWW-Authenticate") if e.code == 401 else None
             e.close()
             if not challenge:
+                if hub_manifest and e.code in (401, 404):
+                    raise _hub_not_found(ref) from e
                 raise PullError(f"{url}: HTTP {e.code} {e.reason}") from e
-            self._tokens[key] = self._fetch_token(challenge)
+            self._tokens[key] = self._fetch_token(challenge, ref if hub_manifest else None)
         except urllib.error.URLError as e:
             raise PullError(f"{url}: {e.reason}") from e
         try:
             return self._open(url, headers, self._tokens[key])
         except urllib.error.HTTPError as e:
             e.close()
+            if hub_manifest and e.code in (401, 404):
+                raise _hub_not_found(ref) from e
             raise PullError(f"{url}: HTTP {e.code} {e.reason}") from e
         except urllib.error.URLError as e:
             raise PullError(f"{url}: {e.reason}") from e

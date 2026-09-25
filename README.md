@@ -75,6 +75,21 @@ daemon: image pulls that would reuse a local `docker save` skip a shim.
 Limits on the Dockerfile subset: no multi-stage builds (a second `FROM`, or
 `--from=`), no `.dockerignore`, and no remote `ADD`/`COPY` from a URL.
 
+## Hosts without docker
+
+On a host with no docker daemon, a `FROM` name that only ever existed in a
+local daemon, such as `coala-runtime-python:latest`, is looked up on Docker
+Hub and not found there. Seed such base images once: pull the published
+image and give it the local name.
+
+    xrunner pull hubentu/coala-runtime-python:latest
+    xrunner tag hubentu/coala-runtime-python:latest coala-runtime-python:latest
+    xrunner pull hubentu/coala-runtime-r:latest
+    xrunner tag hubentu/coala-runtime-r:latest coala-runtime-r:latest
+
+After that, `FROM coala-runtime-python:latest` uses the stored image and
+never goes to the network. xrunner does not map image names itself.
+
 ## Environment variables
 
 | Variable | Meaning |
