@@ -511,3 +511,158 @@ def test_colon_plus_expansion(rt, tmp_path):
     labels = built.config["config"]["Labels"]
     assert labels["present"] == "yes"
     assert labels["absent"] == ""
+
+
+# -- round 3, item 1: a stale mode fixup must never chmod a symlink's host target --
+
+def test_copy_stale_fixup_never_chmods_a_symlinks_host_target(rt, tmp_path):
+    ctx = tmp_path / "ctx-hostwrite"
+    ctx.mkdir()
+    hostdir = tmp_path / "hostdir"
+    hostdir.mkdir()
+    os.chmod(hostdir, 0o700)
+    (ctx / "a3" / "q").mkdir(parents=True)
+    os.chmod(ctx / "a3" / "q", 0o777)
+    (ctx / "b3").mkdir()
+    (ctx / "b3" / "q").symlink_to(hostdir)
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY a3/ b3/ /x/\n")
+    built = rt.build(ctx)
+    assert (built.rootfs / "x" / "q").is_symlink()
+    # a3/q (0o777) was queued for a chmod fixup before b3/q's symlink replaced
+    # it at the same path; that fixup must have been dropped, not applied to
+    # whatever the symlink points at on the host.
+    assert stat.S_IMODE(os.stat(hostdir).st_mode) == 0o700
+
+
+# -- round 3, item 2: a directory source must replace a symlink left by an earlier one --
+
+def test_copy_directory_replaces_symlink_left_by_earlier_source(rt, tmp_path):
+    ctx = tmp_path / "ctx-symlinkmerge"
+    ctx.mkdir()
+    hostdir = tmp_path / "hostdir2"
+    hostdir.mkdir()
+    (ctx / "b3").mkdir()
+    (ctx / "b3" / "q").symlink_to(hostdir)
+    (ctx / "a3" / "q").mkdir(parents=True)
+    (ctx / "a3" / "q" / "file").write_text("content")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY b3/ a3/ /x/\n")
+    built = rt.build(ctx)
+    assert not (built.rootfs / "x" / "q").is_symlink()
+    assert (built.rootfs / "x" / "q" / "file").read_text() == "content"
+    assert list(hostdir.iterdir()) == [], "nothing must ever be written into the link's target"
+
+
+# -- round 3, item 3: a later file/link must replace an earlier directory, even nested --
+
+def test_copy_file_replaces_earlier_directory_with_nested_contents(rt, tmp_path):
+    ctx = tmp_path / "ctx-crashA1"
+    ctx.mkdir()
+    (ctx / "a" / "y" / "nested").mkdir(parents=True)
+    (ctx / "a" / "y" / "nested" / "z").write_text("z")
+    (ctx / "y").write_text("file-y")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY a/ y /x/\n")
+    built = rt.build(ctx)
+    assert (built.rootfs / "x" / "y").read_text() == "file-y"
+
+
+def test_copy_file_replaces_earlier_directory_with_nested_contents_second_case(rt, tmp_path):
+    ctx = tmp_path / "ctx-crashA2"
+    ctx.mkdir()
+    (ctx / "a2" / "q" / "nested").mkdir(parents=True)
+    (ctx / "a2" / "q" / "nested" / "z").write_text("z")
+    (ctx / "b2").mkdir()
+    (ctx / "b2" / "q").write_text("file-q")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY a2/ b2/ /x/\n")
+    built = rt.build(ctx)
+    assert (built.rootfs / "x" / "q").read_text() == "file-q"
+
+
+# -- round 3, item 4: a single-pass word lexer for ARG/ENV/LABEL/COPY/WORKDIR/USER/FROM --
+
+def test_lexer_single_quote_and_var_in_same_env(rt, tmp_path):
+    ctx = tmp_path / "ctx-lex1"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nARG y=Y_VALUE\nENV A='$x' B=$y\n")
+    built = rt.build(ctx)
+    env = built.config["config"]["Env"]
+    assert "A=$x" in env
+    assert "B=Y_VALUE" in env
+
+
+def test_lexer_backslash_dollar_escape(rt, tmp_path):
+    ctx = tmp_path / "ctx-lex2"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nENV A=\\$x\n")
+    built = rt.build(ctx)
+    assert "A=$x" in built.config["config"]["Env"]
+
+
+def test_lexer_double_quote_expands_and_keeps_apostrophe(rt, tmp_path):
+    ctx = tmp_path / "ctx-lex3"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text(
+        'FROM xcodon-test/busybox\nARG HOME=/home/test\nENV MSG="it\'s $HOME"\n'
+    )
+    built = rt.build(ctx)
+    assert "MSG=it's /home/test" in built.config["config"]["Env"]
+
+
+def test_lexer_arg_double_quote_expands_var(rt, tmp_path):
+    ctx = tmp_path / "ctx-lex4"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text(
+        'FROM xcodon-test/busybox\nARG X=world\nARG M="it\'s $X"\nLABEL m=$M\n'
+    )
+    built = rt.build(ctx)
+    assert built.config["config"]["Labels"]["m"] == "it's world"
+
+
+def test_lexer_label_apostrophe_in_double_quotes(rt, tmp_path):
+    ctx = tmp_path / "ctx-lex5"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nLABEL d=\"don't\"\n")
+    built = rt.build(ctx)
+    assert built.config["config"]["Labels"]["d"] == "don't"
+
+
+def test_lexer_unclosed_quote_raises(rt, tmp_path):
+    ctx = tmp_path / "ctx-lex6"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text('FROM xcodon-test/busybox\nENV X="abc\n')
+    with pytest.raises(XcodonError):
+        rt.build(ctx)
+
+
+# -- round 3, item 5: nested COPY entries must also resolve through rootfs symlinks --
+
+def test_copy_dir_source_nested_entries_resolve_through_rootfs_symlinks(rt, tmp_path, home):
+    from tests.conftest import build_busybox_rootfs, pack_rootfs_as_image
+
+    root = build_busybox_rootfs(tmp_path / "mergedusr2")
+    (root / "usr").mkdir()
+    shutil.move(str(root / "bin"), str(root / "usr" / "bin"))
+    (root / "bin").symlink_to("usr/bin")
+    pack_rootfs_as_image(home, root, "xcodon-test/mergedusr2:latest")
+
+    ctx = tmp_path / "ctx-mergedusr2"
+    ctx.mkdir()
+    (ctx / "rootfs" / "bin").mkdir(parents=True)
+    (ctx / "rootfs" / "bin" / "tool").write_text("hi")
+    (ctx / "Dockerfile").write_text(
+        "FROM xcodon-test/mergedusr2\nCOPY rootfs/ /\nRUN echo via-nested-symlink > /out\n"
+    )
+    built = rt.build(ctx)
+    assert (built.rootfs / "usr" / "bin" / "tool").read_text() == "hi"
+    assert built.rootfs.joinpath("bin").is_symlink()
+    assert (built.rootfs / "out").read_text() == "via-nested-symlink\n"
+
+
+# -- round 3, item 6: a non-directory path component raises a clear error ----
+
+def test_copy_dest_through_non_directory_component_raises(rt, tmp_path):
+    ctx = tmp_path / "ctx-notadir"
+    ctx.mkdir()
+    (ctx / "f").write_text("x")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY f /etc/passwd/x\n")
+    with pytest.raises(XcodonError, match="directory"):
+        rt.build(ctx)

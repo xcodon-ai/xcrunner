@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import posixpath
-import re
 import shlex
 import shutil
 import stat
@@ -18,6 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
+from xcodon_runtime.buildpaths import (
+    expand_args,
+    rootfs_dir_mode,
+    rootfs_exists,
+    resolve_in_rootfs,
+    split_words,
+)
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.imagestore import Image
 
@@ -30,13 +36,6 @@ IGNORED = {"EXPOSE", "VOLUME", "HEALTHCHECK", "STOPSIGNAL", "MAINTAINER", "ONBUI
 KNOWN_INSTRUCTIONS = {"ARG", "FROM", "ENV", "LABEL", "WORKDIR", "USER", "CMD", "ENTRYPOINT", "RUN", "COPY", "ADD",
                       "SHELL"} | IGNORED
 DEFAULT_SHELL = ["/bin/sh", "-c"]
-MAX_SYMLINK_HOPS = 40
-# ``$NAME`` / ``${NAME}`` / ``${NAME:-default}`` / ``${NAME:+word}``.
-_VAR = re.compile(
-    r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(:-|:\+)([^}]*)\}"
-    r"|\{([A-Za-z_][A-Za-z0-9_]*)\}"
-    r"|([A-Za-z_][A-Za-z0-9_]*))"
-)
 
 
 @dataclass
@@ -81,57 +80,6 @@ def parse_dockerfile(text: str) -> list[Instruction]:
     return out
 
 
-def expand_args(text: str, args: Mapping[str, str]) -> str:
-    """Expand ``$NAME``, ``${NAME}``, ``${NAME:-default}``, and ``${NAME:+word}``.
-
-    A backslash right before ``$`` escapes it to a literal ``$`` (the
-    backslash is consumed). Text inside single quotes is left untouched,
-    ``$`` included, the way a POSIX shell leaves it -- the quote characters
-    themselves are not stripped here; a later ``shlex``-based dequote does
-    that once expansion is done, so word-splitting still sees the original
-    quoting.
-    """
-
-    def sub(m: re.Match) -> str:
-        if m.group(1) is not None:
-            name, op, word = m.group(1), m.group(2), m.group(3)
-            value = args.get(name)
-            if op == ":-":
-                return value if value else word
-            return word if value else ""
-        name = m.group(4) or m.group(5)
-        return args.get(name, "")
-
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    in_single = False
-    while i < n:
-        c = text[i]
-        if c == "'":
-            in_single = not in_single
-            out.append(c)
-            i += 1
-            continue
-        if in_single:
-            out.append(c)
-            i += 1
-            continue
-        if c == "\\" and i + 1 < n and text[i + 1] == "$":
-            out.append("$")
-            i += 2
-            continue
-        if c == "$":
-            m = _VAR.match(text, i)
-            if m:
-                out.append(sub(m))
-                i = m.end()
-                continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-
 def parse_command(args: str, shell: list[str]) -> list[str]:
     """Parse a CMD/ENTRYPOINT/RUN/SHELL argument: JSON exec form, or a plain shell string."""
     s = args.strip()
@@ -150,29 +98,27 @@ def parse_env(args: str, scope: Mapping[str, str] | None = None) -> dict[str, st
     """Parse ENV/LABEL arguments.
 
     Splits into Dockerfile-level words first, using the raw (unexpanded)
-    text so the original quoting decides word boundaries, then expands
-    ``$VAR`` within each already-bounded word. Doing it in the other order
-    (expand the whole line, then split) would let a value that expands to
-    include a space get mis-split into a second word.
+    text so the original quoting decides word boundaries and which spans are
+    single-quoted (see ``split_words``), then expands ``$VAR`` within each
+    already-bounded word. Doing it in the other order (expand the whole
+    line, then split) would both lose single-quote-suppresses-`$`
+    information and let a value that expands to include a space get
+    mis-split into a second word.
     """
     s = args.strip()
     if not s:
         raise XcodonError("ENV/LABEL requires at least one KEY=value pair")
     scope = scope or {}
     if "=" not in s.split(None, 1)[0]:
-        key, _, value = s.partition(" ")
-        value = value.strip()
-        if not value:
+        key, _, rest = s.partition(" ")
+        rest = rest.strip()
+        if not rest:
             raise XcodonError(f"ENV {key!r} requires a value")
-        return {key: expand_args(value, scope)}
-    try:
-        tokens = shlex.split(s)
-    except ValueError as e:
-        raise XcodonError(f"cannot parse ENV/LABEL arguments {s!r}: {e}") from e
+        return {key: " ".join(split_words(rest, scope))}
+    words = split_words(s, scope)
     out: dict[str, str] = {}
-    for token in tokens:
-        expanded = expand_args(token, scope)
-        k, _, v = expanded.partition("=")
+    for word in words:
+        k, _, v = word.partition("=")
         out[k] = v
     return out
 
@@ -206,80 +152,6 @@ def _hash_tree(paths: Sequence[Path]) -> str:
     for p in sorted(paths):
         add(p, p.name)
     return h.hexdigest()
-
-
-# -- symlink-safe rootfs path resolution --------------------------------------
-
-def resolve_in_rootfs(rootfs: Path, guest: str) -> str:
-    """Resolve a guest path inside an image rootfs without ever following a symlink onto the host.
-
-    Walks the normalized guest path one component at a time. At each step
-    the path built so far is already known to contain no symlinks (each
-    earlier component was individually verified), so joining exactly one
-    more raw component and taking a single ``lstat`` of that is safe: the
-    host kernel only has to walk through already-verified real directories,
-    and the trailing component itself is never dereferenced by ``lstat``.
-
-    Every existing symlink found this way is read with ``os.readlink`` --
-    never followed by the host kernel. An absolute target is re-rooted at
-    ``rootfs`` (never the host's real root); a relative target is joined to
-    the symlink's own containing directory. The result is renormalized and
-    clamped at ``/`` after every hop, so ``..`` can never climb above it,
-    matching docker. Raises ``XcodonError`` past ``MAX_SYMLINK_HOPS`` hops
-    (a symlink loop).
-    """
-    normalized = posixpath.normpath("/" + guest.lstrip("/"))
-    queue = [p for p in normalized.split("/") if p]
-    resolved: list[str] = []
-    hops = 0
-    while queue:
-        part = queue.pop(0)
-        if part == "..":
-            if resolved:
-                resolved.pop()
-            continue
-        if part == ".":
-            continue
-        candidate = resolved + [part]
-        host_path = rootfs / "/".join(candidate)
-        try:
-            st = host_path.lstat()
-        except OSError:
-            resolved = candidate
-            continue
-        if stat.S_ISLNK(st.st_mode):
-            hops += 1
-            if hops > MAX_SYMLINK_HOPS:
-                raise XcodonError(f"too many symlink hops resolving {guest!r} in the image")
-            target = os.readlink(host_path)
-            target_parts = [p for p in target.split("/") if p]
-            if target.startswith("/"):
-                resolved = []
-            queue = target_parts + queue
-        else:
-            resolved = candidate
-    return "/" + "/".join(resolved) if resolved else "/"
-
-
-def _rootfs_lstat(rootfs: Path, guest: str) -> os.stat_result | None:
-    """``lstat`` of a guest path, resolved symlink-safely first. None if it does not exist."""
-    resolved = resolve_in_rootfs(rootfs, guest)
-    try:
-        return (rootfs / resolved.lstrip("/")).lstat()
-    except OSError:
-        return None
-
-
-def _rootfs_dir_mode(rootfs: Path, guest: str) -> int | None:
-    """The mode of ``guest`` in ``rootfs`` if it exists there as a directory, else None."""
-    st = _rootfs_lstat(rootfs, guest)
-    if st is not None and stat.S_ISDIR(st.st_mode):
-        return stat.S_IMODE(st.st_mode)
-    return None
-
-
-def _rootfs_exists(rootfs: Path, guest: str) -> bool:
-    return _rootfs_lstat(rootfs, guest) is not None
 
 
 class Builder:
@@ -320,18 +192,8 @@ class Builder:
             scope[k] = v
         return scope
 
-    def _dequote(self, text: str) -> str:
-        try:
-            parts = shlex.split(text)
-        except ValueError as e:
-            raise XcodonError(f"cannot parse value {text!r}: {e}") from e
-        return " ".join(parts)
-
     def _arg_value(self, raw: str, scope: Mapping[str, str]) -> str:
-        # Expand first (single quotes there suppress $ the way a shell would),
-        # then strip the quote characters -- doing it the other way round
-        # would lose which spans were single-quoted before expansion ever saw them.
-        return self._dequote(expand_args(raw, scope))
+        return " ".join(split_words(raw, scope))
 
     # -- build -------------------------------------------------------------------
 
@@ -383,7 +245,7 @@ class Builder:
                 if image is not None:
                     raise XcodonError(f"line {ins.line}: multi-stage builds (a second FROM) are not supported")
                 from_scope = {k: v for k, v in global_defaults.items() if v is not None}
-                tokens = expand_args(ins.args, from_scope).split()
+                tokens = split_words(ins.args, from_scope)
                 while tokens and tokens[0].startswith("--"):
                     flag = tokens.pop(0)
                     if flag.startswith("--platform"):
@@ -415,10 +277,9 @@ class Builder:
             parsed_env: dict[str, str] = {}
             if ins.name in ("COPY", "ADD"):
                 scope = self._scope(image, args)
-                raw_paths = self._parse_copy_args(ins.args, ins)
-                if len(raw_paths) < 2:
+                paths = self._parse_copy_args(ins.args, ins, scope)
+                if len(paths) < 2:
                     raise XcodonError(f"line {ins.line}: {ins.name} requires at least one source and a destination")
-                paths = [expand_args(p, scope) for p in raw_paths]
                 sources = self._resolve_sources(paths[:-1], ins)
                 dest = paths[-1]
                 content_hash = _hash_tree(sources)
@@ -427,7 +288,7 @@ class Builder:
                 parsed_env = parse_env(ins.args, self._scope(image, args))
                 expanded = json.dumps(parsed_env, sort_keys=True)
             elif ins.name in ("WORKDIR", "USER"):
-                expanded = expand_args(ins.args, self._scope(image, args))
+                expanded = " ".join(split_words(ins.args, self._scope(image, args)))
             else:  # RUN, CMD, ENTRYPOINT, SHELL: used verbatim, the shell resolves its own vars
                 expanded = ins.args
                 if ins.name == "RUN":
@@ -465,13 +326,14 @@ class Builder:
 
     # -- COPY / ADD ----------------------------------------------------------
 
-    def _parse_copy_args(self, text: str, ins: Instruction) -> list[str]:
-        """Split a COPY/ADD instruction's raw text into path tokens, handling flags.
+    def _parse_copy_args(self, text: str, ins: Instruction, scope: Mapping[str, str]) -> list[str]:
+        """Split and expand a COPY/ADD instruction's raw text into path tokens, handling flags.
 
-        Called on the *raw* (unexpanded) text: word-splitting must see the
-        Dockerfile's own quoting before any ``$VAR`` is substituted, so a
-        substituted value's internal spaces are never mistaken for a new
-        word boundary by a second round of splitting.
+        Word-splitting and ``$VAR`` expansion happen together, in
+        ``split_words``, on the *raw* text: the Dockerfile's own quoting
+        decides word boundaries (and which spans are single-quoted, so a
+        literal ``$`` there is never substituted) before any value is
+        substituted in.
         """
         s = text.strip()
         if s.startswith("["):
@@ -481,13 +343,11 @@ class Builder:
                 raise XcodonError(f"line {ins.line}: bad exec-form path list {s!r}: {e}") from e
             if not isinstance(parts, list) or not all(isinstance(p, str) for p in parts):
                 raise XcodonError(f"line {ins.line}: {ins.name} path list must be a JSON array of strings: {s!r}")
-            return parts
-        try:
-            tokens = shlex.split(s)
-        except ValueError as e:
-            raise XcodonError(f"line {ins.line}: cannot parse {ins.name} arguments {s!r}: {e}") from e
+            words = [expand_args(p, scope) for p in parts]
+        else:
+            words = split_words(s, scope)
         paths: list[str] = []
-        for t in tokens:
+        for t in words:
             if t.startswith("--from"):
                 raise XcodonError(f"line {ins.line}: multi-stage builds ({ins.name} --from) are not supported")
             if t.startswith("--chown") or t.startswith("--chmod"):
@@ -517,12 +377,32 @@ class Builder:
     def _src_mode(self, src: Path) -> int:
         return stat.S_IMODE(os.lstat(src).st_mode)
 
-    def _remove_existing(self, target: Path) -> None:
+    def _assert_within_layer(self, layer: Path, target: Path) -> None:
+        """Refuse to write outside ``layer``, following symlinks on both sides (realpath).
+
+        A purely lexical (``os.path.normpath``) comparison would miss a
+        target that only escapes because some component *inside* the layer
+        was itself replaced by a symlink earlier in this same step; ``..``
+        in a guest path is already excluded upstream by ``resolve_in_rootfs``,
+        so this is defense in depth, not the primary guard.
+        """
+        layer_real = os.path.realpath(str(layer))
+        target_real = os.path.realpath(str(target))
+        if target_real != layer_real and not target_real.startswith(layer_real + os.sep):
+            raise XcodonError(f"refusing to write outside the build layer: {target}")
+
+    def _remove_existing(self, target: Path, mode_fixups: list[tuple[Path, int]]) -> None:
         """Remove whatever is at ``target`` so a placement never writes through a stale link.
 
         Checked in this order because ``is_dir``/``is_file`` follow symlinks:
         a symlink (to a file or a directory) is always unlinked, never
-        ``rmtree``'d (which refuses to operate on a symlink anyway).
+        ``rmtree``'d (which refuses to operate on a symlink anyway). Also
+        drops every queued mode fixup at or under ``target``: one queued for
+        a directory that used to be here (e.g. from an earlier source in the
+        same COPY) must never be applied to whatever now occupies -- or used
+        to be reachable through -- that path, which is how a stale fixup
+        could otherwise chmod a symlink's host target, or hit a path that no
+        longer exists because a parent is now a file.
         """
         if target.is_symlink():
             target.unlink()
@@ -530,23 +410,43 @@ class Builder:
             shutil.rmtree(target)
         elif target.exists():
             target.unlink()
+        else:
+            return
+        target_str = str(target)
+        mode_fixups[:] = [
+            (p, m) for p, m in mode_fixups
+            if str(p) != target_str and not str(p).startswith(target_str + os.sep)
+        ]
 
-    def _guard_within_layer(self, layer: Path, target: Path) -> None:
-        """Second guard, in addition to guest-path resolution: refuse to write outside ``layer``."""
-        layer_str = os.path.normpath(str(layer))
-        target_str = os.path.normpath(str(target))
-        if target_str != layer_str and not target_str.startswith(layer_str + os.sep):
-            raise XcodonError(f"refusing to write outside the build layer: {target}")
-
-    def _apply_mode_fixups(self, fixups: list[tuple[Path, int]]) -> None:
+    def _apply_mode_fixups(self, layer: Path, fixups: list[tuple[Path, int]]) -> None:
         """Chmod every directory this step created to its final mode, deepest first.
 
         Deferred until every file is in place: a directory whose final mode
         has no owner-write bit (mirroring a read-only source directory or an
         existing image directory) must stay writable while its own contents
         are still being created inside it.
+
+        Each entry is re-checked here, right before the chmod, rather than
+        trusted from when it was queued: ``os.lstat`` must show a real
+        directory (``os.chmod`` follows symlinks -- Linux has no lchmod, so
+        ``follow_symlinks=False`` raises ``NotImplementedError`` -- and
+        chmod'ing a symlink would silently reach through it and change a
+        *host* path's mode instead), and its ``os.path.realpath`` must stay
+        inside the layer's own realpath. A path that no longer exists, or
+        that is no longer a real directory there, or that somehow resolves
+        outside the layer, is skipped instead of chmod'ed.
         """
+        layer_real = os.path.realpath(str(layer))
         for path, mode in sorted(fixups, key=lambda pm: len(pm[0].parts), reverse=True):
+            try:
+                st = path.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISDIR(st.st_mode):
+                continue
+            real = os.path.realpath(str(path))
+            if real != layer_real and not real.startswith(layer_real + os.sep):
+                continue
             os.chmod(path, mode)
 
     def _materialize_dir(self, layer: Path, resolved_rel: str, image: Image, leaf_fallback_mode: int,
@@ -557,9 +457,12 @@ class Builder:
         the same path in ``image.rootfs`` when that path exists there as a
         directory; otherwise the final component gets ``leaf_fallback_mode``
         and any earlier scaffolding parent gets 0o755. The mode is only
-        queued (in ``mode_fixups``), never applied immediately: applying it
-        here would block writing further content into a directory whose
-        resolved mode is not owner-writable.
+        queued (in ``mode_fixups``), never applied immediately (see
+        ``_apply_mode_fixups``). Whatever already occupies a path component
+        that is not itself a directory (a symlink left by an earlier source
+        in the same COPY, or a plain file) is removed first and replaced
+        with a fresh directory, matching docker's own "a later directory
+        replaces an earlier non-directory" merge behavior.
         """
         cur = layer
         rootfs_cur = image.rootfs
@@ -567,6 +470,8 @@ class Builder:
         for i, part in enumerate(parts):
             cur = cur / part
             rootfs_cur = rootfs_cur / part
+            if cur.is_symlink() or (cur.exists() and not cur.is_dir()):
+                self._remove_existing(cur, mode_fixups)
             if not cur.exists():
                 mode = leaf_fallback_mode if i == len(parts) - 1 else 0o755
                 try:
@@ -575,43 +480,46 @@ class Builder:
                         mode = stat.S_IMODE(st.st_mode)
                 except OSError:
                     pass
+                self._assert_within_layer(layer, cur)
                 cur.mkdir()
                 mode_fixups.append((cur, mode))
         return cur
 
-    def _copy_tree_into(self, src: Path, target: Path, image: Image, dest_rel: str,
+    def _copy_tree_into(self, src: Path, image: Image, dest_rel: str, layer: Path,
                          mode_fixups: list[tuple[Path, int]]) -> None:
-        """Merge the contents of a source directory into an already-materialized target directory.
+        """Merge the contents of a source directory into the guest directory at ``dest_rel``.
 
-        A later source (or a later entry in the same source) always wins: an
-        existing non-directory in the way of a directory entry is replaced,
-        and a file or symlink placement always removes whatever was there
-        first. A nested subdirectory takes the mode of the same path in
-        ``image.rootfs`` when it exists there, else its own mode in ``src``;
-        that mode is queued in ``mode_fixups``, applied only after this
-        subdirectory's own contents are placed (deepest first overall).
+        ``dest_rel`` is already symlink-resolved; each entry's own
+        destination is resolved fresh through ``resolve_in_rootfs`` again
+        (not just inherited from the parent), so a symlink encountered at
+        *any* nesting level -- not only at the top of the merge -- still
+        redirects placement to its target, the same way a top-level COPY
+        destination does. A later source (or a later entry in the same
+        source) always wins: an existing non-directory in the way of a
+        directory entry is replaced (via ``_materialize_dir``), and a file
+        or symlink placement always removes whatever was there first.
         """
         for entry in sorted(os.scandir(src), key=lambda e: e.name):
             child_rel_raw = f"{dest_rel}/{entry.name}" if dest_rel else entry.name
             resolved_child_rel = resolve_in_rootfs(image.rootfs, "/" + child_rel_raw).lstrip("/")
-            child_target = target / entry.name
-            if entry.is_symlink():
-                self._remove_existing(child_target)
-                os.symlink(os.readlink(entry.path), child_target)
-            elif entry.is_dir(follow_symlinks=False):
-                if child_target.is_symlink() or (child_target.exists() and not child_target.is_dir()):
-                    self._remove_existing(child_target)
-                is_new = not child_target.exists()
+            if entry.is_dir(follow_symlinks=False):
+                # _materialize_dir queues this directory's own mode fixup (using
+                # the rootfs's existing mode when there is one, else this
+                # entry's own mode) only the first time it creates it; a
+                # second source merging into the same already-materialized
+                # directory leaves its mode alone.
                 mode = stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode)
-                existing_mode = _rootfs_dir_mode(image.rootfs, "/" + resolved_child_rel)
-                if existing_mode is not None:
-                    mode = existing_mode
-                if is_new:
-                    child_target.mkdir()
-                self._copy_tree_into(Path(entry.path), child_target, image, resolved_child_rel, mode_fixups)
-                mode_fixups.append((child_target, mode))
+                self._materialize_dir(layer, resolved_child_rel, image, mode, mode_fixups)
+                self._copy_tree_into(Path(entry.path), image, resolved_child_rel, layer, mode_fixups)
+                continue
+            parent_rel = os.path.dirname(resolved_child_rel)
+            parent_dir = self._materialize_dir(layer, parent_rel, image, 0o755, mode_fixups) if parent_rel else layer
+            child_target = parent_dir / os.path.basename(resolved_child_rel)
+            self._assert_within_layer(layer, child_target)
+            self._remove_existing(child_target, mode_fixups)
+            if entry.is_symlink():
+                os.symlink(os.readlink(entry.path), child_target)
             else:
-                self._remove_existing(child_target)
                 shutil.copy2(entry.path, child_target, follow_symlinks=False)
 
     def _copy_step(self, image: Image, sources: list[Path], dest: str, text: str, ins: Instruction) -> Image:
@@ -624,7 +532,7 @@ class Builder:
         resolved_dest = resolve_in_rootfs(image.rootfs, dest_abs)
         dest_rel = resolved_dest.lstrip("/")
         dest_dir_form = dest == "." or dest.endswith("/") or dest.endswith("/.")
-        dest_exists_as_dir = _rootfs_dir_mode(image.rootfs, resolved_dest) is not None
+        dest_exists_as_dir = rootfs_dir_mode(image.rootfs, resolved_dest) is not None
         dest_looks_like_dir = dest_dir_form or dest_exists_as_dir
         if len(sources) > 1 and not dest_looks_like_dir:
             raise XcodonError(
@@ -642,23 +550,23 @@ class Builder:
                     # A directory source always copies its contents, never nested
                     # under its own name, regardless of the destination's form.
                     target_dir = self._materialize_dir(layer, dest_rel, image, self._src_mode(src), mode_fixups)
-                    self._guard_within_layer(layer, target_dir)
-                    self._copy_tree_into(src, target_dir, image, dest_rel, mode_fixups)
+                    self._assert_within_layer(layer, target_dir)
+                    self._copy_tree_into(src, image, dest_rel, layer, mode_fixups)
                 elif dest_is_dir:
                     target_dir = self._materialize_dir(layer, dest_rel, image, 0o755, mode_fixups)
                     target = target_dir / src.name
-                    self._guard_within_layer(layer, target)
-                    self._remove_existing(target)
+                    self._assert_within_layer(layer, target)
+                    self._remove_existing(target, mode_fixups)
                     shutil.copy2(src, target, follow_symlinks=False)
                 else:
                     parent_rel = os.path.dirname(dest_rel)
                     if parent_rel:
                         self._materialize_dir(layer, parent_rel, image, 0o755, mode_fixups)
                     target = layer / dest_rel
-                    self._guard_within_layer(layer, target)
-                    self._remove_existing(target)
+                    self._assert_within_layer(layer, target)
+                    self._remove_existing(target, mode_fixups)
                     shutil.copy2(src, target, follow_symlinks=False)
-            self._apply_mode_fixups(mode_fixups)
+            self._apply_mode_fixups(layer, mode_fixups)
             return self.rt.images.commit(image, layer, created_by=f"{ins.name} {text}")
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -696,8 +604,7 @@ class Builder:
         if name == "WORKDIR":
             base = image.config.get("config", {}).get("WorkingDir") or "/"
             raw_path = text if text.startswith("/") else os.path.join(base, text)
-            path = posixpath.normpath(raw_path)
-            return self._workdir_step(image, path, text), shell
+            return self._workdir_step(image, raw_path, text), shell
         elif name == "USER":
             changes = {"User": text}
         elif name in ("CMD", "ENTRYPOINT"):
@@ -717,13 +624,17 @@ class Builder:
         Matches docker: if the path does not exist in the base image, the
         commit carries a layer with just that empty directory (and its
         parents, each preserving any pre-existing mode); otherwise this is a
-        config-only commit like the other metadata instructions. The path is
-        resolved symlink-safely before either check, so WORKDIR through an
-        existing symlink lands on its target, never wipes it out.
+        config-only commit like the other metadata instructions. The stored
+        ``WorkingDir`` is the normalized (".." clamped at "/") but not
+        symlink-resolved path, matching docker's own config value; the
+        filesystem check and any materialization use the symlink-resolved
+        path, so WORKDIR through an existing symlink lands on its target,
+        never wipes it out.
         """
-        changes = {"WorkingDir": path}
+        normalized = posixpath.normpath(path)
+        changes = {"WorkingDir": normalized}
         resolved = resolve_in_rootfs(image.rootfs, path)
-        if _rootfs_exists(image.rootfs, resolved):
+        if rootfs_exists(image.rootfs, resolved):
             return self.rt.images.commit(image, None, changes=changes, created_by=f"WORKDIR {text}")
         work = Path(tempfile.mkdtemp(prefix="workdir-", dir=self.rt.home.path))
         try:
@@ -731,8 +642,8 @@ class Builder:
             layer.mkdir()
             mode_fixups: list[tuple[Path, int]] = []
             target_dir = self._materialize_dir(layer, resolved.lstrip("/"), image, 0o755, mode_fixups)
-            self._guard_within_layer(layer, target_dir)
-            self._apply_mode_fixups(mode_fixups)
+            self._assert_within_layer(layer, target_dir)
+            self._apply_mode_fixups(layer, mode_fixups)
             return self.rt.images.commit(image, layer, changes=changes, created_by=f"WORKDIR {text}")
         finally:
             shutil.rmtree(work, ignore_errors=True)
