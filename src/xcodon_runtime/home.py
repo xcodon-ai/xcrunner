@@ -12,6 +12,11 @@ from typing import Iterator
 
 from xcodon_runtime.errors import XcodonError
 
+# Scratch directories made at the home root (see ``RuntimeHome.prune_leftovers``):
+# ``Runtime.commit`` uses commit-, and the build's COPY and WORKDIR steps use
+# copy- and workdir-.
+SCRATCH_PREFIXES = ("commit-", "copy-", "workdir-")
+
 
 def default_home() -> Path:
     env = os.environ.get("XCODON_RUNTIME_HOME")
@@ -81,8 +86,24 @@ class RuntimeHome:
         os.replace(tmp, self.refs_file)
 
     def prune_leftovers(self) -> list[Path]:
-        """Remove half-built ``*.tmp`` directories and ``*.part`` blobs."""
+        """Remove half-built ``*.tmp`` directories, ``*.part`` blobs, and dead scratch dirs.
+
+        The scratch dirs are the ``commit-*``, ``copy-*`` and ``workdir-*``
+        directories that a commit or a build step makes at the home root and
+        removes when done; one killed midway leaves its dir behind. The
+        caller must hold ``store`` exclusive: every commit and build holds it
+        shared while its scratch dir exists, so none found here is live.
+        """
+        from xcodon_runtime.containers import _rmtree_tolerant
+
         removed: list[Path] = []
+        for prefix in SCRATCH_PREFIXES:
+            for p in self.path.glob(prefix + "*"):
+                if not p.is_dir() or p.is_symlink():
+                    continue
+                _rmtree_tolerant(p)
+                if not os.path.lexists(p):
+                    removed.append(p)
         for parent in (self.layers, self.images, self.containers):
             for p in parent.glob("*.tmp"):
                 shutil.rmtree(p, ignore_errors=True)

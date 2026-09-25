@@ -138,3 +138,17 @@ def test_home_path_with_option_separators_is_refused(tmp_path, bad):
     """Overlayfs mount options split on ',' and ':' and cannot quote them."""
     with pytest.raises(XcodonError, match="overlayfs"):
         RuntimeHome(tmp_path / bad)
+
+
+def test_prune_leftovers_sweeps_dead_build_and_commit_scratch_dirs(home):
+    for name in ("commit-abc", "copy-def", "workdir-ghi"):
+        (home.path / name / "layer").mkdir(parents=True)
+    ro = home.path / "copy-ro" / "layer" / "ro"
+    ro.mkdir(parents=True)
+    (ro / "f").write_text("x")
+    os.chmod(ro, 0o555)
+    (home.path / "copy-file").write_text("not a dir")
+    (home.path / "keep-me").mkdir()
+    removed = home.prune_leftovers()
+    assert {p.name for p in removed} == {"commit-abc", "copy-def", "workdir-ghi", "copy-ro"}
+    assert (home.path / "keep-me").is_dir() and (home.path / "copy-file").is_file()

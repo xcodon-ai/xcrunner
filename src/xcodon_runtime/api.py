@@ -315,16 +315,20 @@ class Runtime:
             kind, path = source
             if not path.is_dir():
                 raise XcodonError(f"nothing to commit: {path} does not exist")
-            work = Path(tempfile.mkdtemp(prefix="commit-", dir=self.home.path))
-            try:
-                layer_dir = work / "layer"
-                if kind == "upper":
-                    snapshot_upper(path, layer_dir)
-                else:
-                    snapshot_diff(path, base.rootfs, layer_dir)
-                return self.images.commit(base, layer_dir, changes=changes, ref=tag, created_by=created_by)
-            finally:
-                _rmtree_tolerant(work)
+            # ``store`` shared around the scratch dir's whole life: prune takes
+            # it exclusive and sweeps leftover ``commit-*`` dirs, which must
+            # never include this live one.
+            with self.home.lock("store", shared=True):
+                work = Path(tempfile.mkdtemp(prefix="commit-", dir=self.home.path))
+                try:
+                    layer_dir = work / "layer"
+                    if kind == "upper":
+                        snapshot_upper(path, layer_dir)
+                    else:
+                        snapshot_diff(path, base.rootfs, layer_dir)
+                    return self.images.commit(base, layer_dir, changes=changes, ref=tag, created_by=created_by)
+                finally:
+                    _rmtree_tolerant(work)
         finally:
             if env_lock_fd is not None:
                 os.close(env_lock_fd)

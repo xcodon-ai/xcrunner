@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Mapping, Sequence
@@ -24,6 +25,7 @@ from xcodon_runtime.buildpaths import (
     resolve_in_rootfs,
     split_words,
 )
+from xcodon_runtime.containers import _rmtree_tolerant
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.imagestore import Image
 
@@ -126,12 +128,14 @@ def parse_env(args: str, scope: Mapping[str, str] | None = None) -> dict[str, st
     return out
 
 
-def _hash_tree(paths: Sequence[Path]) -> str:
+def _hash_tree(sources: Sequence[tuple[str, Path]]) -> str:
     """Hash a set of COPY/ADD sources: every entry's relative path, type, mode, and content.
 
-    Symlinks are never followed (a symlink to a directory is hashed as a
-    link, not descended into); empty directories are included so that adding
-    or removing one still changes the hash.
+    Each source is a (name, path) pair from ``Builder._resolve_sources``: the
+    name the source is copied under and the resolved path its content comes
+    from. Symlinks below a source are never followed (a symlink to a
+    directory is hashed as a link, not descended into); empty directories
+    are included so that adding or removing one still changes the hash.
     """
     h = hashlib.sha256()
 
@@ -152,8 +156,8 @@ def _hash_tree(paths: Sequence[Path]) -> str:
             h.update(full.read_bytes())
             h.update(b"\0")
 
-    for p in sorted(paths):
-        add(p, p.name)
+    for name, p in sorted(sources):
+        add(p, name)
     return h.hexdigest()
 
 
@@ -217,115 +221,122 @@ class Builder:
         shell = list(DEFAULT_SHELL)
         image: Image | None = None
 
-        for n, ins in enumerate(instructions, 1):
-            self.out(f"Step {n}/{len(instructions)} : {ins.name} {ins.args}")
+        # ``store`` shared from the FROM step to the end, so a concurrent
+        # ``prune --all`` cannot delete an intermediate (untagged) step image
+        # while later steps still build on it. It is taken only after FROM
+        # has resolved, which may pull: lock order is pull -> store, and a
+        # pull takes both itself.
+        with ExitStack() as held:
+            for n, ins in enumerate(instructions, 1):
+                self.out(f"Step {n}/{len(instructions)} : {ins.name} {ins.args}")
 
-            if ins.name == "ARG":
-                name, has_default, default_raw = ins.args.partition("=")
-                name = name.strip()
-                if not name:
-                    raise XcodonError(f"line {ins.line}: ARG requires a name")
+                if ins.name == "ARG":
+                    name, has_default, default_raw = ins.args.partition("=")
+                    name = name.strip()
+                    if not name:
+                        raise XcodonError(f"line {ins.line}: ARG requires a name")
+                    if image is None:
+                        if name in overrides:
+                            global_defaults[name] = overrides[name]
+                        elif has_default:
+                            scope = {k: v for k, v in global_defaults.items() if v is not None}
+                            global_defaults[name] = self._arg_value(default_raw, scope)
+                        else:
+                            global_defaults.setdefault(name, None)
+                    else:
+                        if name in overrides:
+                            args[name] = overrides[name]
+                        elif has_default:
+                            args[name] = self._arg_value(default_raw, self._scope(image, args))
+                        elif global_defaults.get(name) is not None:
+                            args[name] = global_defaults[name]
+                        else:
+                            args.pop(name, None)
+                    continue
+
+                if ins.name == "FROM":
+                    if image is not None:
+                        raise XcodonError(f"line {ins.line}: multi-stage builds (a second FROM) are not supported")
+                    from_scope = {k: v for k, v in global_defaults.items() if v is not None}
+                    tokens = split_words(ins.args, from_scope)
+                    while tokens and tokens[0].startswith("--"):
+                        flag = tokens.pop(0)
+                        if flag.startswith("--platform"):
+                            self.out(f" ---> {flag} is ignored by xrunner")
+                            log.warning("Dockerfile line %d: %s is ignored by xrunner", ins.line, flag)
+                        else:
+                            raise XcodonError(f"line {ins.line}: unsupported FROM flag {flag!r}")
+                    if not tokens:
+                        raise XcodonError(f"line {ins.line}: FROM requires an image reference")
+                    if len(tokens) > 1:
+                        raise XcodonError(f"line {ins.line}: multi-stage builds (FROM ... AS name) are not supported")
+                    image = self.rt.resolve_image(tokens[0])
+                    held.enter_context(self.rt.home.lock("store", shared=True))
+                    args = {}
+                    shell = list(image.config.get("config", {}).get("Shell") or DEFAULT_SHELL)
+                    self.out(f" ---> {image.short_id}")
+                    continue
+
                 if image is None:
-                    if name in overrides:
-                        global_defaults[name] = overrides[name]
-                    elif has_default:
-                        scope = {k: v for k, v in global_defaults.items() if v is not None}
-                        global_defaults[name] = self._arg_value(default_raw, scope)
-                    else:
-                        global_defaults.setdefault(name, None)
-                else:
-                    if name in overrides:
-                        args[name] = overrides[name]
-                    elif has_default:
-                        args[name] = self._arg_value(default_raw, self._scope(image, args))
-                    elif global_defaults.get(name) is not None:
-                        args[name] = global_defaults[name]
-                    else:
-                        args.pop(name, None)
-                continue
+                    raise XcodonError(f"line {ins.line}: FROM must come before {ins.name}")
 
-            if ins.name == "FROM":
-                if image is not None:
-                    raise XcodonError(f"line {ins.line}: multi-stage builds (a second FROM) are not supported")
-                from_scope = {k: v for k, v in global_defaults.items() if v is not None}
-                tokens = split_words(ins.args, from_scope)
-                while tokens and tokens[0].startswith("--"):
-                    flag = tokens.pop(0)
-                    if flag.startswith("--platform"):
-                        self.out(f" ---> {flag} is ignored by xrunner")
-                        log.warning("Dockerfile line %d: %s is ignored by xrunner", ins.line, flag)
-                    else:
-                        raise XcodonError(f"line {ins.line}: unsupported FROM flag {flag!r}")
-                if not tokens:
-                    raise XcodonError(f"line {ins.line}: FROM requires an image reference")
-                if len(tokens) > 1:
-                    raise XcodonError(f"line {ins.line}: multi-stage builds (FROM ... AS name) are not supported")
-                image = self.rt.resolve_image(tokens[0])
-                args = {}
-                shell = list(image.config.get("config", {}).get("Shell") or DEFAULT_SHELL)
-                self.out(f" ---> {image.short_id}")
-                continue
+                if ins.name in IGNORED:
+                    self.out(f" ---> {ins.name} is ignored by xrunner")
+                    log.warning("Dockerfile line %d: %s is ignored by xrunner", ins.line, ins.name)
+                    continue
 
-            if image is None:
-                raise XcodonError(f"line {ins.line}: FROM must come before {ins.name}")
+                content_hash = ""
+                sources: list[tuple[str, Path]] = []
+                dest = ""
+                parsed_env: dict[str, str] = {}
+                if ins.name in ("COPY", "ADD"):
+                    scope = self._scope(image, args)
+                    paths = self._parse_copy_args(ins.args, ins, scope)
+                    if len(paths) < 2:
+                        raise XcodonError(f"line {ins.line}: {ins.name} requires at least one source and a destination")
+                    sources = self._resolve_sources(paths[:-1], ins)
+                    dest = paths[-1]
+                    content_hash = _hash_tree(sources)
+                    expanded = shlex.join(paths)
+                elif ins.name in ("ENV", "LABEL"):
+                    parsed_env = parse_env(ins.args, self._scope(image, args))
+                    expanded = json.dumps(parsed_env, sort_keys=True)
+                elif ins.name in ("WORKDIR", "USER"):
+                    expanded = " ".join(split_words(ins.args, self._scope(image, args)))
+                else:  # RUN, CMD, ENTRYPOINT, SHELL: used verbatim, the shell resolves its own vars
+                    expanded = ins.args
+                    if ins.name == "RUN":
+                        content_hash = ",".join(f"{k}={v}" for k, v in sorted(args.items()))
 
-            if ins.name in IGNORED:
-                self.out(f" ---> {ins.name} is ignored by xrunner")
-                log.warning("Dockerfile line %d: %s is ignored by xrunner", ins.line, ins.name)
-                continue
+                key = hashlib.sha256(f"{image.id}|{ins.name}|{expanded}|{content_hash}".encode()).hexdigest()
+                cached_image = None
+                if not no_cache:
+                    cached_id = self._cache_get(key)
+                    if cached_id:
+                        cached_image = self.rt.images.get(cached_id)
+                if cached_image is not None:
+                    image = cached_image
+                    self.out(f" ---> CACHED {image.short_id}")
+                    continue
 
-            content_hash = ""
-            sources: list[Path] = []
-            dest = ""
-            parsed_env: dict[str, str] = {}
-            if ins.name in ("COPY", "ADD"):
-                scope = self._scope(image, args)
-                paths = self._parse_copy_args(ins.args, ins, scope)
-                if len(paths) < 2:
-                    raise XcodonError(f"line {ins.line}: {ins.name} requires at least one source and a destination")
-                sources = self._resolve_sources(paths[:-1], ins)
-                dest = paths[-1]
-                content_hash = _hash_tree(sources)
-                expanded = shlex.join(paths)
-            elif ins.name in ("ENV", "LABEL"):
-                parsed_env = parse_env(ins.args, self._scope(image, args))
-                expanded = json.dumps(parsed_env, sort_keys=True)
-            elif ins.name in ("WORKDIR", "USER"):
-                expanded = " ".join(split_words(ins.args, self._scope(image, args)))
-            else:  # RUN, CMD, ENTRYPOINT, SHELL: used verbatim, the shell resolves its own vars
-                expanded = ins.args
                 if ins.name == "RUN":
-                    content_hash = ",".join(f"{k}={v}" for k, v in sorted(args.items()))
+                    image = self._run_step(image, parse_command(expanded, shell), args, expanded)
+                elif ins.name in ("COPY", "ADD"):
+                    image = self._copy_step(image, sources, dest, expanded, ins)
+                elif ins.name in ("ENV", "LABEL"):
+                    changes = ({"Env": [f"{k}={v}" for k, v in parsed_env.items()]} if ins.name == "ENV"
+                               else {"Labels": parsed_env})
+                    image = self.rt.images.commit(image, None, changes=changes, created_by=f"{ins.name} {ins.args}")
+                else:
+                    image, shell = self._config_step(image, ins.name, expanded, ins, shell)
+                self.out(f" ---> {image.short_id}")
+                self._cache_put(key, image.id)
 
-            key = hashlib.sha256(f"{image.id}|{ins.name}|{expanded}|{content_hash}".encode()).hexdigest()
-            cached_image = None
-            if not no_cache:
-                cached_id = self._cache_get(key)
-                if cached_id:
-                    cached_image = self.rt.images.get(cached_id)
-            if cached_image is not None:
-                image = cached_image
-                self.out(f" ---> CACHED {image.short_id}")
-                continue
-
-            if ins.name == "RUN":
-                image = self._run_step(image, parse_command(expanded, shell), args, expanded)
-            elif ins.name in ("COPY", "ADD"):
-                image = self._copy_step(image, sources, dest, expanded, ins)
-            elif ins.name in ("ENV", "LABEL"):
-                changes = ({"Env": [f"{k}={v}" for k, v in parsed_env.items()]} if ins.name == "ENV"
-                           else {"Labels": parsed_env})
-                image = self.rt.images.commit(image, None, changes=changes, created_by=f"{ins.name} {ins.args}")
-            else:
-                image, shell = self._config_step(image, ins.name, expanded, ins, shell)
-            self.out(f" ---> {image.short_id}")
-            self._cache_put(key, image.id)
-
-        assert image is not None
-        for t in tags:
-            image = self.rt.images.tag(image.id, t)
-        self.out(f"Successfully built {image.short_id}")
-        return image
+            assert image is not None
+            for t in tags:
+                image = self.rt.images.tag(image.id, t)
+            self.out(f"Successfully built {image.short_id}")
+            return image
 
     # -- COPY / ADD ----------------------------------------------------------
 
@@ -362,8 +373,16 @@ class Builder:
             paths.append(t)
         return paths
 
-    def _resolve_sources(self, patterns: list[str], ins: Instruction) -> list[Path]:
-        out: list[Path] = []
+    def _resolve_sources(self, patterns: list[str], ins: Instruction) -> list[tuple[str, Path]]:
+        """Match COPY/ADD source patterns in the context. Returns (name, content path) pairs.
+
+        The name comes from the lexical path, so ``COPY link.txt /d/`` lands
+        at ``/d/link.txt``. The content path is the resolved path: a source
+        that is itself a symlink is followed, as docker does, and the
+        resolved path must stay inside the context. Symlinks below a source
+        directory are copied as links.
+        """
+        out: list[tuple[str, Path]] = []
         for pat in patterns:
             if pat.startswith(("http://", "https://")):
                 raise XcodonError(f"line {ins.line}: {ins.name} from a URL is not supported")
@@ -371,10 +390,13 @@ class Builder:
             if not matches:
                 raise XcodonError(f"line {ins.line}: {ins.name} source {pat!r} not found in the build context")
             for m in matches:
-                p = Path(m).resolve()
+                lexical = Path(os.path.normpath(m))
+                p = lexical.resolve()
                 if self.context not in p.parents and p != self.context:
                     raise XcodonError(f"line {ins.line}: {ins.name} source {pat!r} is outside the build context")
-                out.append(p)
+                if not p.exists():
+                    raise XcodonError(f"line {ins.line}: {ins.name} source {pat!r} is a link to a missing file")
+                out.append((lexical.name, p))
         return out
 
     def _src_mode(self, src: Path) -> int:
@@ -538,7 +560,8 @@ class Builder:
             parent_dir = self._materialize_dir(layer, dest_rel, image, 0o755, mode_fixups) if dest_rel else layer
             self._place_non_dir(layer, Path(entry.path), parent_dir / entry.name, mode_fixups)
 
-    def _copy_step(self, image: Image, sources: list[Path], dest: str, text: str, ins: Instruction) -> Image:
+    def _copy_step(self, image: Image, sources: list[tuple[str, Path]], dest: str, text: str,
+                   ins: Instruction) -> Image:
         workdir = image.config.get("config", {}).get("WorkingDir") or "/"
         dest_abs = dest if dest.startswith("/") else os.path.join(workdir, dest)
         # Resolve the destination as an absolute guest path: normalize (so ".."
@@ -561,7 +584,7 @@ class Builder:
             layer = work / "layer"
             layer.mkdir()
             mode_fixups: list[tuple[Path, int]] = []
-            for src in sources:
+            for name, src in sources:
                 if src.is_dir():
                     # A directory source always copies its contents, never nested
                     # under its own name, regardless of the destination's form.
@@ -570,20 +593,22 @@ class Builder:
                     self._copy_tree_into(src, image, dest_rel, layer, mode_fixups)
                 elif dest_is_dir:
                     target_dir = self._materialize_dir(layer, dest_rel, image, 0o755, mode_fixups)
-                    self._place_non_dir(layer, src, target_dir / src.name, mode_fixups)
+                    self._place_non_dir(layer, src, target_dir / name, mode_fixups)
                 else:
                     # A file destination resolves only its parent through the
                     # image's symlinks. Its own name is kept, so a link already
                     # at that name is replaced, never written through.
-                    parent_guest, name = posixpath.split(posixpath.normpath("/" + dest_abs.lstrip("/")))
+                    parent_guest, dest_name = posixpath.split(posixpath.normpath("/" + dest_abs.lstrip("/")))
                     parent_rel = resolve_in_rootfs(image.rootfs, parent_guest).lstrip("/")
                     parent_dir = (self._materialize_dir(layer, parent_rel, image, 0o755, mode_fixups)
                                   if parent_rel else layer)
-                    self._place_non_dir(layer, src, parent_dir / name, mode_fixups)
+                    self._place_non_dir(layer, src, parent_dir / dest_name, mode_fixups)
             self._apply_mode_fixups(layer, mode_fixups)
             return self.rt.images.commit(image, layer, created_by=f"{ins.name} {text}")
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            # Tolerant removal: a context directory with mode 0555 is copied
+            # with that mode, and a plain rmtree cannot empty it.
+            _rmtree_tolerant(work)
 
     # -- RUN -------------------------------------------------------------------
 
@@ -592,7 +617,10 @@ class Builder:
         # the same name already won that name for the image: ENV always wins.
         env_keys = {item.partition("=")[0] for item in (image.config.get("config", {}).get("Env") or [])}
         run_env = {k: v for k, v in args.items() if k not in env_keys}
-        c = self.rt.create(image.id, command=argv)
+        # pull="never": the step image is in the store, and the build holds
+        # ``store`` shared, so prune cannot remove it. A missing image is a
+        # bug to report, never a reason to ask a registry for "<hex>".
+        c = self.rt.create(image.id, command=argv, pull="never")
         try:
             self.rt.start(c)
             p = self.rt.popen(c, argv, env=run_env, stdin=subprocess.DEVNULL,
@@ -660,4 +688,6 @@ class Builder:
             self._apply_mode_fixups(layer, mode_fixups)
             return self.rt.images.commit(image, layer, changes=changes, created_by=f"WORKDIR {text}")
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            # Tolerant removal: a context directory with mode 0555 is copied
+            # with that mode, and a plain rmtree cannot empty it.
+            _rmtree_tolerant(work)

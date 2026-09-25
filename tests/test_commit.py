@@ -178,3 +178,37 @@ def test_resolve_reimports_when_daemon_id_changed(home, busybox_image, monkeypat
     monkeypatch.setattr(DaemonSource, "image_id", lambda self, ref: "sha256:" + "e" * 64)
     rt.resolve_image("xcodon-test/busybox")
     assert calls == ["xcodon-test/busybox"], "locally built images are never replaced"
+
+
+def test_commit_holds_store_shared_while_its_scratch_dir_exists(home, busybox_image, engine_name, monkeypatch):
+    """prune (store exclusive) sweeps leftover commit-* dirs, so a live commit must hold store shared."""
+    import fcntl
+    import os
+
+    from xcodon_runtime import api
+
+    rt = Runtime(home.path, engine=engine_name)
+    c = rt.create("xcodon-test/busybox", command=["/bin/true"])
+    rt.start(c)
+    rt.stop(c)
+    seen = []
+    real = api.snapshot_diff
+
+    def spy(rootfs, base_rootfs, dest):
+        fd = os.open(home.locks / "store.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            seen.append("free")
+        except BlockingIOError:
+            seen.append("held")
+        finally:
+            os.close(fd)
+        return real(rootfs, base_rootfs, dest)
+
+    monkeypatch.setattr(api, "snapshot_diff", spy)
+    monkeypatch.setattr(api, "snapshot_upper", lambda upper, dest: spy(upper, busybox_image.rootfs, dest))
+    try:
+        rt.commit(c, "xcodon-test/held:1")
+    finally:
+        rt.remove(c)
+    assert seen == ["held"]

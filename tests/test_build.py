@@ -820,3 +820,103 @@ def test_env_bare_key_mixed_with_pairs_raises(rt, tmp_path):
     (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nENV A=1 B\n")
     with pytest.raises(XcodonError, match="'B'"):
         rt.build(ctx)
+
+
+# -- final review, item 3: scratch dirs go away even with a read-only context dir --
+
+def test_build_leaves_no_scratch_dir_for_a_readonly_context_dir(rt, tmp_path, home):
+    ctx = tmp_path / "ctx-ro"
+    (ctx / "ro").mkdir(parents=True)
+    (ctx / "ro" / "f").write_text("x")
+    os.chmod(ctx / "ro", 0o555)
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY . /opt/c/\nWORKDIR /new/dir\n")
+    try:
+        built = rt.build(ctx)
+    finally:
+        os.chmod(ctx / "ro", 0o755)
+    assert (built.rootfs / "opt/c/ro/f").read_text() == "x"
+    left = [p.name for p in home.path.iterdir() if p.name.startswith(("copy-", "workdir-", "commit-"))]
+    assert left == []
+
+
+# -- final review, item 5: the build holds store shared; RUN never pulls ---------
+
+def _store_is_free(home) -> bool:
+    import fcntl
+
+    fd = os.open(home.locks / "store.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_build_holds_store_shared_from_from_to_the_end(rt, tmp_path, home):
+    ctx = tmp_path / "ctx-lock"
+    ctx.mkdir()
+    (ctx / "f").write_text("f")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nRUN echo one > /one\nCOPY f /f\nENV A=1\n")
+    free_at_step: dict[str, bool] = {}
+
+    def out(line: str) -> None:
+        if line.startswith("Step "):
+            free_at_step[line.split()[1]] = _store_is_free(home)
+
+    rt.build(ctx, tags=["xcodon-test/locked:1"], out=out)
+    assert free_at_step["1/4"] is True, "FROM runs before the lock (it may pull)"
+    assert free_at_step["2/4"] is False and free_at_step["3/4"] is False and free_at_step["4/4"] is False, \
+        "prune (store exclusive) must wait while later steps build on intermediate images"
+    assert _store_is_free(home), "the build releases the lock at the end"
+
+
+def test_run_step_never_pulls_a_missing_step_image(rt, home, monkeypatch):
+    from xcodon_runtime.build import Builder
+    from xcodon_runtime.errors import ImageNotFound
+    from xcodon_runtime.imagestore import ImageStore
+
+    base = rt.images.require("xcodon-test/busybox")
+    step = rt.images.commit(base, None, changes={"Env": ["STEP=1"]}, created_by="test")
+    shutil.rmtree(step.dir)  # what a concurrent `prune --all` did before the build held store
+
+    def no_pull(self, ref, platform=None):
+        raise AssertionError(f"a RUN step must never pull; asked for {ref}")
+
+    monkeypatch.setattr(ImageStore, "pull", no_pull)
+    with pytest.raises(ImageNotFound):
+        Builder(rt, home.path)._run_step(step, ["/bin/true"], {}, "true")
+
+
+# -- final review, item 6: a symlink source keeps its own name --------------------
+
+def test_copy_symlink_source_keeps_its_name_and_copies_the_target(rt, tmp_path):
+    ctx = tmp_path / "ctx-srclink"
+    ctx.mkdir()
+    (ctx / "real.txt").write_text("R")
+    (ctx / "link.txt").symlink_to("real.txt")
+    (ctx / "sub").mkdir()
+    (ctx / "sub" / "s").write_text("S")
+    (ctx / "linkdir").symlink_to("sub")
+    (ctx / "Dockerfile").write_text(
+        "FROM xcodon-test/busybox\nCOPY link.txt /d/\nCOPY link.txt /f\nCOPY linkdir /e/\n")
+    built = rt.build(ctx)
+    d = built.rootfs / "d"
+    # Docker (BuildKit, checked against docker 29.8.1) follows a top-level
+    # source link: the entry is named after the link and holds the target's content.
+    assert sorted(os.listdir(d)) == ["link.txt"]
+    assert not (d / "link.txt").is_symlink() and (d / "link.txt").read_text() == "R"
+    assert (built.rootfs / "f").read_text() == "R"
+    assert sorted(os.listdir(built.rootfs / "e")) == ["s"]
+
+
+def test_copy_symlink_source_pointing_outside_the_context_is_an_error(rt, tmp_path):
+    ctx = tmp_path / "ctx-srclink-out"
+    ctx.mkdir()
+    (tmp_path / "secret.txt").write_text("secret")
+    (ctx / "leak.txt").symlink_to(tmp_path / "secret.txt")
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nCOPY leak.txt /d/\n")
+    with pytest.raises(XcodonError, match="outside the build context"):
+        rt.build(ctx)
