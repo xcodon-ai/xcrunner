@@ -58,9 +58,10 @@ commits one image per step, so unchanged steps are cached. `xrunner commit`
 also works on an `--env-dir` folder instead of a container:
 `xrunner commit --env-dir $PWD/.xrunner-env --image myapp:1 myapp:2`.
 
-For tools that shell out to a real `docker` binary (build systems, CI
-scripts, cwltool's docker path), `xrunner shim install` writes a `docker`
-script that forwards every call to `xrunner docker`:
+For tools that shell out to a real `docker` binary directly — running
+`docker build` or `docker image inspect` as a subprocess, rather than going
+through cwltool's `--user-space-docker-cmd` — `xrunner shim install` writes
+a `docker` script that forwards every call to `xrunner docker`:
 
     xrunner shim install --dir ~/.local/bin
     export PATH="$HOME/.local/bin:$PATH"

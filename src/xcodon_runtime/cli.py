@@ -7,17 +7,18 @@ import csv
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
-import stat
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
 
 from xcodon_runtime import __version__
 from xcodon_runtime.api import Runtime
-from xcodon_runtime.daemon import SHIM_MARKER
+from xcodon_runtime.daemon import SHIM_MARKER, _is_shim, _resolve_docker
 from xcodon_runtime.engine import Bind
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.keeper import KEEPER_LOG
@@ -237,8 +238,10 @@ DOCKER_VERBS = {
 }
 # `docker image <verb>` has its own, smaller, vocabulary.
 DOCKER_IMAGE_VERBS = {"inspect": ["inspect"], "ls": ["images"], "list": ["images"], "rm": ["rmi"], "remove": ["rmi"]}
-# `docker ... inspect` flags xrunner ignores: our inspect always prints the full JSON list.
-_INSPECT_DROP = {"--format", "-f", "--type"}
+# `docker ... inspect --type ...` disambiguates container vs image; xrunner's inspect is
+# always an image, so that flag (and its `=value` form) is dropped. `--format`/`-f` is
+# NOT dropped here: cmd_inspect understands the exact `{{.Id}}` format itself (see below).
+_INSPECT_DROP = {"--type"}
 
 
 def translate_docker_argv(argv: list[str]) -> list[str]:
@@ -249,7 +252,8 @@ def translate_docker_argv(argv: list[str]) -> list[str]:
     verb, rest = argv[0], list(argv[1:])
     if verb == "image":
         if not rest or rest[0] not in DOCKER_IMAGE_VERBS:
-            raise UsageError(f"docker image {rest[:1]}: not supported by xrunner")
+            sub_verb = rest[0] if rest else ""
+            raise UsageError(f"docker image {sub_verb}: not supported by xrunner")
         head = DOCKER_IMAGE_VERBS[rest[0]]
         rest = rest[1:]
         verb = "inspect" if head == ["inspect"] else head[0]
@@ -267,7 +271,7 @@ def translate_docker_argv(argv: list[str]) -> list[str]:
             if tok in _INSPECT_DROP:
                 skip = True
                 continue
-            if tok.startswith("--format=") or tok.startswith("--type="):
+            if tok.startswith("--type="):
                 continue
             cleaned.append(tok)
         rest = cleaned
@@ -289,13 +293,33 @@ def cmd_pull(rt: Runtime, args) -> int:
     return 0
 
 
+# docker's `--format '{{.Id}}'`, whitespace inside the braces allowed. Any other
+# --format value is accepted (docker itself supports a whole template language we do
+# not) but ignored: we print the full JSON and warn instead of failing outright.
+_ID_FORMAT_RE = re.compile(r"^\{\{\s*\.Id\s*\}\}$")
+
+
 def cmd_inspect(rt: Runtime, args) -> int:
-    doc = rt.images.inspect(args.image)
-    print(json.dumps(doc, indent=2))
-    if not doc:
-        print(f"Error: No such image: {args.image}", file=sys.stderr)
-        return 1
-    return 0
+    refs = args.image if isinstance(args.image, list) else [args.image]
+    docs: list[dict] = []
+    missing: list[str] = []
+    for ref in refs:
+        doc = rt.images.inspect(ref)
+        if doc:
+            docs.extend(doc)
+        else:
+            missing.append(ref)
+    fmt = getattr(args, "format", None)
+    if fmt and _ID_FORMAT_RE.match(fmt.strip()):
+        for d in docs:
+            print(d["Id"])
+    else:
+        if fmt:
+            log.warning("ignoring unsupported --format %r; printing the full JSON instead", fmt)
+        print(json.dumps(docs, indent=2))
+    for ref in missing:
+        print(f"Error: No such image: {ref}", file=sys.stderr)
+    return 1 if missing else 0
 
 
 def cmd_images(rt: Runtime, args) -> int:
@@ -449,12 +473,18 @@ def cmd_commit(rt: Runtime, args) -> int:
             raise UsageError("commit needs a CONTAINER, or --env-dir DIR --image IMAGE")
         container = rt.get_container(args.container)
         base = rt.images.require(container.image_id)
+    # A mutable copy: each `-c ENV ...` change updates it, so a later `-c` sees the
+    # variables an earlier one just set (`-c 'ENV A=1' -c 'ENV B=$A'` gives B=1), not
+    # just the base image's own Env.
     scope = _image_env_scope(base)
     changes: dict = {}
     for spec in args.change or []:
         for k, v in _parse_change(spec, scope).items():
             if k == "Env":
                 changes.setdefault("Env", []).extend(v)
+                for item in v:
+                    ek, _, ev = item.partition("=")
+                    scope[ek] = ev
             elif k == "Labels":
                 changes.setdefault("Labels", {}).update(v)
             else:
@@ -480,23 +510,41 @@ def cmd_docker(rt: Runtime, args) -> int:
 
 def cmd_shim(rt: Runtime, args) -> int:
     target_dir = Path(args.dir or os.path.dirname(sys.executable)).expanduser().resolve()
-    existing = shutil.which(SHIM_NAME)
-    if existing and not args.force:
-        try:
-            is_ours = SHIM_MARKER in Path(existing).read_text(errors="ignore")
-        except OSError:
-            is_ours = False
-        if not is_ours:
-            raise UsageError(f"a real docker is on PATH at {existing}; pass --force to install the shim anyway")
+    shim_path = target_dir / SHIM_NAME
+    if not args.force:
+        # Anywhere on PATH: reuses daemon.py's own shim-aware resolver, so a stale shim
+        # earlier in PATH cannot hide a real docker installed further along it.
+        real_on_path = _resolve_docker(SHIM_NAME)
+        if real_on_path:
+            raise UsageError(f"a real docker is on PATH at {real_on_path}; pass --force to install the shim anyway")
+        # DIR itself, even when DIR is not on PATH at all: `os.path.lexists` so a
+        # symlink is detected without following it, and `_is_shim` decides purely from
+        # the 512-byte marker check, never from where a symlink points.
+        if os.path.lexists(shim_path) and not _is_shim(str(shim_path)):
+            raise UsageError(f"{shim_path} already exists and is not an xrunner shim; "
+                              f"pass --force to overwrite it")
     xrunner = os.path.join(os.path.dirname(sys.executable), "xrunner")
     if not os.access(xrunner, os.X_OK):
         xrunner = shutil.which("xrunner") or "xrunner"
     target_dir.mkdir(parents=True, exist_ok=True)
-    shim = target_dir / SHIM_NAME
-    shim.write_text(f"#!/bin/sh\n{SHIM_MARKER}\nexec {shlex.quote(xrunner)} docker \"$@\"\n")
-    mode = shim.stat().st_mode
-    shim.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    print(f"installed {shim}")
+    script = f"#!/bin/sh\n{SHIM_MARKER}\nexec {shlex.quote(xrunner)} docker \"$@\"\n"
+    # Write to a temp file in the same directory, then `os.replace` it onto the final
+    # name: that swaps the directory entry atomically, so an existing symlink at
+    # `shim_path` is replaced rather than opened and written through (which would
+    # instead overwrite whatever real docker binary it points at).
+    fd, tmp_name = tempfile.mkstemp(dir=target_dir, prefix=".docker-shim-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        os.chmod(tmp_name, 0o755)
+        os.replace(tmp_name, shim_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    print(f"installed {shim_path}")
     if str(target_dir) not in os.environ.get("PATH", "").split(os.pathsep):
         print(f'add it to PATH: export PATH="{target_dir}:$PATH"')
     return 0
@@ -519,7 +567,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_pull)
 
     s = sub.add_parser("inspect", help="print image metadata as JSON")
-    s.add_argument("image")
+    s.add_argument("--format", "-f", help="only \"{{.Id}}\" is understood; anything else is ignored")
+    s.add_argument("image", nargs="+")
     s.set_defaults(func=cmd_inspect)
 
     sub.add_parser("images", help="list stored images").set_defaults(func=cmd_images)
@@ -605,7 +654,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("image", help="docker-style image commands")
     isub = s.add_subparsers(dest="image_cmd", required=True)
     i = isub.add_parser("inspect")
-    i.add_argument("image")
+    i.add_argument("--format", "-f", help="only \"{{.Id}}\" is understood; anything else is ignored")
+    i.add_argument("image", nargs="+")
     i.set_defaults(func=cmd_inspect)
     isub.add_parser("ls").set_defaults(func=cmd_images)
     i = isub.add_parser("rm")
@@ -657,7 +707,11 @@ def main(argv: list[str] | None = None, _runtime: Runtime | None = None) -> int:
         args.rest = docker_rest
     elif rest is not None:
         args.rest = rest
-    _configure_logging(args.verbose)
+    if _runtime is None:
+        # Only the outer call configures logging: the re-entrant call from cmd_docker
+        # parses a translated argv with no `-v`/`-vv` of its own, and would otherwise
+        # silently reset verbosity back to the default on every `xrunner docker ...`.
+        _configure_logging(args.verbose)
     try:
         rt = _runtime if _runtime is not None else Runtime(args.home, engine=args.engine)
         return args.func(rt, args)
