@@ -946,6 +946,10 @@ writing `conda-explicit.txt`; the command's own exit code is unchanged.
   with `xrunner: micromamba is not installed; run: xrunner shim install
   conda`.
 - The pinned binary needs glibc 2.17 or newer and links only against glibc.
+- The binary is used exactly as extracted from the archive, without the
+  placeholder-prefix rewrite a conda installer normally applies
+  (`info/has_prefix`); this is safe because xrunner always passes the root
+  prefix explicitly on every call.
 
 ### 12.8 Shim install
 

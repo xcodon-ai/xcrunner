@@ -42,7 +42,7 @@ def test_pinned_values_are_the_conda_forge_2_9_0_package():
     assert mm.MICROMAMBA_VERSION == "2.9.0"
     assert mm.MICROMAMBA_URL == "https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2"
     assert mm.MICROMAMBA_ARCHIVE_SHA256 == "8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd"
-    assert mm.MICROMAMBA_BINARY_SHA256 == "790cbf43cb101027c6b7d483903fa155c69bd2ddf8ae03a11a796675a1008575"
+    assert mm.MICROMAMBA_BINARY_SHA256 == "366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3"
 
 
 def test_install_downloads_verifies_and_extracts(home, pinned_fake):

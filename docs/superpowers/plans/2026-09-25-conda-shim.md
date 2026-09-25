@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Python `>=3.10`, stdlib only. Plain English docstrings and messages. Every error derives from `XcodonError`; the CLI maps an uncaught `XcodonError` to exit 125.
-- Pinned micromamba: version `2.9.0`; URL `https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2`; archive SHA-256 `8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd`; `bin/micromamba` SHA-256 `790cbf43cb101027c6b7d483903fa155c69bd2ddf8ae03a11a796675a1008575`. Stored at `<home>/bin/micromamba-2.9.0`. linux-64 only.
+- Pinned micromamba: version `2.9.0`; URL `https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2`; archive SHA-256 `8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd`; `bin/micromamba` SHA-256 `366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3`. Stored at `<home>/bin/micromamba-2.9.0`. linux-64 only.
 - `XRUNNER_MICROMAMBA` overrides the binary at call time. `xrunner conda` never downloads; a missing binary raises with `micromamba is not installed; run: xrunner shim install conda`.
 - Root prefix order: `-r/--root-prefix` flag, then `<XRUNNER_ENV_DIR>/conda`, then `<nearest .xrunner-env>/conda` searching upward from the working directory, then `<home>/conda`. The home fallback prints one stderr line: `xrunner: no project env folder found; using <root>`.
 - Every micromamba process gets `HOME=<root>/.home`, `XDG_CACHE_HOME=<root>/.home/.cache`, `XDG_CONFIG_HOME=<root>/.home/.config`, `MAMBA_ROOT_PREFIX=<root>`, `CONDA_PKGS_DIRS=<home>/conda-pkgs`, `--no-rc`, and `-r <root>`, except `clean`, which micromamba 2.9.0 rejects `-r` for and which gets the root from `MAMBA_ROOT_PREFIX` alone. The user's real `~/.conda` is never read or written.

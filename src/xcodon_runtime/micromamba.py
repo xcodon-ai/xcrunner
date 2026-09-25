@@ -23,7 +23,11 @@ from xcodon_runtime.home import RuntimeHome
 MICROMAMBA_VERSION = "2.9.0"
 MICROMAMBA_URL = "https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2"
 MICROMAMBA_ARCHIVE_SHA256 = "8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd"
-MICROMAMBA_BINARY_SHA256 = "790cbf43cb101027c6b7d483903fa155c69bd2ddf8ae03a11a796675a1008575"
+# SHA-256 of `bin/micromamba` exactly as stored in the archive. Conda installers
+# rewrite a placeholder prefix inside it (info/has_prefix); xrunner uses the
+# file as extracted, which is safe because every call passes the root prefix
+# explicitly.
+MICROMAMBA_BINARY_SHA256 = "366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3"
 MICROMAMBA_ENV = "XRUNNER_MICROMAMBA"
 _MEMBER = "bin/micromamba"
 _CHUNK = 1 << 20
