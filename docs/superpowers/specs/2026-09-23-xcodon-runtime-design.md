@@ -784,3 +784,178 @@ are never replaced by this check.
 
 Multi-stage builds, `RUN --mount`, build secrets, `.dockerignore`, `ADD`
 from URLs or tar extraction, pushing or exporting images.
+
+## 12. Installing tools without conda
+
+Added 2026-09-25. Approved design. Where xrunner replaces docker, the host
+may have no conda either. The agent still reaches for conda whenever a
+command-line tool is missing, so xrunner must answer those calls itself.
+
+### 12.1 Problem
+
+The agent runs command-line tools through its `run_shell` tool, on the
+host, with the project root as the working directory. When a tool such as
+`bwa` or `bowtie2` is missing, the model runs `conda create -p
+workspace/conda_env ...`, `conda install -n NAME ...` and `conda run -n
+NAME TOOL ...`. On a host without conda every one of these fails. On a host
+with conda they install into the user's own environments, outside the
+project.
+
+### 12.2 Shape
+
+- `xrunner conda ARGS...` accepts conda's command line and runs a pinned
+  micromamba with project-local settings. Micromamba speaks conda's verbs
+  and flags (`create`, `install`, `-n`, `-p`, `-c`), so most commands pass
+  through unchanged.
+- `xrunner shim install conda` writes three executables named `conda`,
+  `mamba` and `micromamba`. Each forwards to `xrunner conda "$@"`. With the
+  shim directory on PATH, the unchanged agent's conda calls reach xrunner.
+- Tools run natively on the host, where the agent expects them. Nothing
+  here runs a container.
+
+### 12.3 Where environments live
+
+The root prefix is the first of:
+
+1. `<XRUNNER_ENV_DIR>/conda`, when `XRUNNER_ENV_DIR` is set.
+2. `<dir>/conda` for the nearest existing directory named `.xrunner-env`,
+   searching from the working directory up to the filesystem root.
+3. `<home>/conda`, under the xrunner runtime home.
+
+An explicit `-r/--root-prefix` on the command line wins over all three.
+The root prefix is created if it is missing. `-n NAME` envs live at
+`<root>/envs/NAME`. `-p PATH` envs live exactly at PATH; a relative PATH is
+taken from the working directory. `conda install` with neither flag targets
+the root prefix itself, as conda's base does.
+
+The agent passes `XRUNNER_ENV_DIR` only to the coala-runtime process, not
+to `run_shell`. Rule 2 covers that case, because `run_shell` starts in the
+project root, which holds `.xrunner-env`. A launcher may also export
+`XRUNNER_ENV_DIR` for the whole agent process.
+
+`.xrunner-env` appears only once a container has started, so an early conda
+call can fall through to rule 3. xrunner then prints one warning line on
+stderr naming the root it used. Lookups of an existing `-n NAME` env, for
+`run`, `list`, `env export` and `remove`, try the resolved root first and
+then `<home>/conda`, so an env created before the project folder existed is
+still found. Creates always go to the resolved root.
+
+The package cache is shared: `CONDA_PKGS_DIRS=<home>/conda-pkgs`. A second
+project that needs the same package links it from the cache instead of
+downloading it again. Micromamba locks the cache and each prefix itself.
+
+### 12.4 Isolation from the user's conda
+
+Micromamba records every `-p` env in `$HOME/.conda/environments.txt` and
+writes `$HOME/.cache`, with no setting to turn either off (checked with
+micromamba 2.9.0). So every micromamba process xrunner starts gets:
+
+- `HOME=<root>/.home`, so the env registry and caches stay in the project.
+- `MAMBA_ROOT_PREFIX=<root>` and `CONDA_PKGS_DIRS=<home>/conda-pkgs`.
+- `--no-rc`, so the user's `~/.condarc` and `~/.mambarc` are ignored.
+- Channels `conda-forge` and `bioconda`, added after any channels the
+  command names with `-c`, without duplicates.
+- `-y` for the verbs that ask for confirmation: `create`, `install`,
+  `update`, `remove`, `uninstall`, `env create`, `env remove`.
+
+The user's real `~/.conda` is never read or written.
+
+### 12.5 Command surface
+
+- Passed through with the settings from 12.4: `create`, `install`,
+  `update`, `remove`, `uninstall`, `list`, `search`, `info`, `clean`,
+  `env list`, `env create -f FILE`, `env export`, `env remove`,
+  `config list`.
+- `run`: implemented by xrunner, not micromamba. Micromamba 2.9.0's `run`
+  fails on this host with `exec: --: invalid option` from its own wrapper
+  script. xrunner parses `-n NAME` or `-p PATH`, honors `--cwd DIR`, and
+  accepts and ignores `--no-capture-output` and `--live-stream`. It sets
+  `PATH=<prefix>/bin:$PATH`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV` and
+  `CONDA_SHLVL=1`, keeps the user's real HOME, and replaces itself with the
+  command, so arguments, stdin, stdout and the exit code are the tool's own.
+  When `<prefix>/etc/conda/activate.d` holds `*.sh` scripts, the command
+  runs as `/bin/sh -c '. SCRIPT; ...; exec "$@"' sh CMD ARGS...` so those
+  scripts apply. A missing env exits 1 with
+  `EnvironmentLocationNotFound: Not a conda environment: <path>`.
+- `activate`, `deactivate`, `init` and `shell` exit 1 with a message that
+  points to `conda run -n NAME CMD` or to `<prefix>/bin/CMD`. Activation
+  changes the calling shell, which a separate process cannot do.
+- `--version` and `-V` print `conda <micromamba version> (micromamba via
+  xrunner)`.
+- Any other verb exits 2 with a message naming the supported verbs.
+- Options before the verb, such as `--json` or `-q`, pass through as given.
+  The `mamba` and `micromamba` shims reach the same code, so
+  micromamba-only flags such as `-r` work through them too.
+
+### 12.6 Rerun record
+
+After a successful `create`, `install`, `update`, `remove` or `env create`
+on an env, xrunner writes `<prefix>/conda-explicit.txt` from `micromamba
+env export --explicit`. It lists every package URL with its checksum, so
+the env can be rebuilt exactly with `conda create -p PATH --file
+conda-explicit.txt`. A failed export logs a warning and does not change the
+command's exit code.
+
+### 12.7 The micromamba binary
+
+- xrunner pins one micromamba release for linux-64: its version, download
+  URL and SHA-256 live in the source. The implementation plan fills them
+  in from the mamba-org release it tests. Other platforms are an error.
+- `xrunner shim install conda` downloads it once into
+  `<home>/bin/micromamba-<version>`, checks the SHA-256, writes it through a
+  temporary file and a rename, and marks it executable.
+- `--micromamba PATH` copies an existing binary instead, for hosts without
+  network access to the release. The environment variable
+  `XRUNNER_MICROMAMBA` points xrunner at a binary at call time.
+- `xrunner conda` never downloads. When no binary is present it exits 125
+  with `xrunner: micromamba is not installed; run: xrunner shim install
+  conda`.
+- The conda-forge build of micromamba 2.9.0 links only against glibc; the
+  pinned release must be checked the same way.
+
+### 12.8 Shim install
+
+`xrunner shim install [docker|conda] [--dir DIR] [--force] [--micromamba
+PATH]`. The kind defaults to `docker`, so the existing command keeps its
+meaning. For `conda`:
+
+- It writes `conda`, `mamba` and `micromamba` into DIR (default: the
+  directory of the running interpreter). Each is `#!/bin/sh`, carries the
+  marker line `# conda shim installed by xrunner`, and runs
+  `exec <absolute xrunner> conda "$@"`.
+- It refuses, unless `--force`, when a real `conda`, `mamba` or
+  `micromamba` is on PATH (xrunner shims are skipped), or when DIR already
+  holds a non-shim file or link under one of the three names. Writes go
+  through a temporary file and `os.replace`, so a link is replaced, never
+  written through. This matches the docker shim in 11.4.
+- It downloads or copies micromamba as in 12.7, and prints how to put DIR
+  on PATH when it is not there.
+
+### 12.9 Errors
+
+- No micromamba: exit 125, message as in 12.7.
+- Solver, network and package errors: micromamba's own message and exit
+  code, unchanged.
+- `run` of a missing env: exit 1. A missing command inside the env: exit
+  127, as a shell reports it.
+- A root prefix that cannot be created: exit 125 naming the path.
+
+### 12.10 Testing
+
+- Unit tests with a fake micromamba, a script that records its argv and
+  environment. They need no network. They cover the root prefix order
+  in 12.3, the settings in 12.4, `-y` and channel handling, the refused
+  verbs, the rerun record, and shim install refusal, `--force`, and link
+  replacement.
+- `run` tests with real env folders built by hand: arguments with
+  spaces and shell characters, stdin, exit codes, activation variables,
+  `activate.d` scripts, a missing env, and a missing command.
+- Network-marked tests with the real pinned micromamba: `create -n` of a
+  small bioconda tool, `run -n` of it, a `-p` env at a relative path, the
+  explicit export, and a sandboxed test HOME whose `.conda` stays empty.
+
+### 12.11 Out of scope
+
+Mounting these envs into containers, conda inside container images (the
+agent's own recipe keeps `|| true`), `conda activate` in the calling
+shell, platforms other than linux-64, and changes to the agent.
