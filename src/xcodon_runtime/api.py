@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import fcntl
+import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,12 +19,15 @@ from typing import Mapping, Sequence
 
 from xcodon_runtime import __version__
 from xcodon_runtime.containers import Container, ContainerStore
+from xcodon_runtime.daemon import DaemonSource
 from xcodon_runtime.engine import Bind, Engine, EngineChoice, get_engine, select_engine
 from xcodon_runtime.engine_proot import find_proot
+from xcodon_runtime.envdir import ENV_LOCK_NAME, env_layer_dir
 from xcodon_runtime.errors import ContainerNotRunning, ImageNotFound, XcodonError
 from xcodon_runtime.home import RuntimeHome
 from xcodon_runtime.imagestore import Image, ImageStore
-from xcodon_runtime.reference import Platform
+from xcodon_runtime.layerdiff import snapshot_diff, snapshot_upper
+from xcodon_runtime.reference import Platform, parse_reference
 from xcodon_runtime.spec import build_spec
 
 log = logging.getLogger(__name__)
@@ -84,11 +91,32 @@ class Runtime:
             return self.images.pull(ref)
         img = self.images.get(ref)
         if img is not None:
+            if self._daemon_tag_moved(ref, img):
+                log.info("image %s changed in the local docker daemon; importing it again", ref)
+                return self.images.pull(ref)
             return img
         if pull == "never":
             raise ImageNotFound(f"image {ref!r} is not in the local store")
         log.info("image %s not found locally; pulling", ref)
         return self.images.pull(ref)
+
+    def _daemon_tag_moved(self, ref: str, img: Image) -> bool:
+        """True when a daemon-sourced tag now points at a different image in the daemon."""
+        try:
+            manifest = json.loads((img.dir / "manifest.json").read_text())
+        except OSError:
+            return False
+        if manifest.get("source") != "daemon":
+            return False
+        try:
+            reference = parse_reference(ref)
+        except XcodonError:
+            return False
+        daemon = next((s for s in self.images.sources if isinstance(s, DaemonSource)), None)
+        if daemon is None or not daemon.available() or not daemon.has_image(reference):
+            return False
+        current = daemon.image_id(reference)
+        return bool(current) and current != f"sha256:{img.id}"
 
     # -- containers --------------------------------------------------------------
 
@@ -195,6 +223,54 @@ class Runtime:
             c.state = "exited"
             c.save()
         return c
+
+    def commit(self, container: Container | None = None, tag: str | None = None, *,
+               env_dir: str | Path | None = None, image: str | None = None,
+               changes: dict | None = None, message: str = "") -> Image:
+        """Snapshot a stopped container's layer, or an env folder layer, as a new image."""
+        if container is not None:
+            base = self.images.require(container.image_id)
+            if container.state == "running" and self._engine(container).is_running(container):
+                raise XcodonError(f"container {container.short_id} is running; stop it before commit")
+            if container.engine == "ns":
+                from xcodon_runtime.engine_ns import NsEngine
+                upper, _ = NsEngine().layer_paths(container)
+                source = ("upper", upper)
+            else:
+                from xcodon_runtime.engine_proot import ProotEngine
+                source = ("rootfs", ProotEngine().rootfs_path(container))
+            created_by = message or f"xrunner commit {container.short_id}"
+        elif env_dir is not None and image is not None:
+            base = self.images.require(image)
+            layer = env_layer_dir(str(env_dir), base.id)
+            if not layer.is_dir():
+                raise XcodonError(f"no env layer for image {base.short_id} under {env_dir}")
+            lock_path = layer / ENV_LOCK_NAME
+            if lock_path.exists():
+                fd = os.open(lock_path, os.O_RDWR)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise XcodonError(f"env layer {layer} is in use by a running container") from None
+                finally:
+                    os.close(fd)
+            source = ("upper", layer / "upper") if (layer / "upper").is_dir() else ("rootfs", layer / "rootfs")
+            created_by = message or f"xrunner commit --env-dir {env_dir}"
+        else:
+            raise XcodonError("commit needs a container, or --env-dir together with the base image")
+        kind, path = source
+        if not path.is_dir():
+            raise XcodonError(f"nothing to commit: {path} does not exist")
+        work = Path(tempfile.mkdtemp(prefix="commit-", dir=self.home.path))
+        try:
+            layer_dir = work / "layer"
+            if kind == "upper":
+                snapshot_upper(path, layer_dir)
+            else:
+                snapshot_diff(path, base.rootfs, layer_dir)
+            return self.images.commit(base, layer_dir, changes=changes, ref=tag, created_by=created_by)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     # -- run ---------------------------------------------------------------------
 

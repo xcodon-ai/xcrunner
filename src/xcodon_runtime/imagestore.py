@@ -2,22 +2,45 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from xcodon_runtime.daemon import DaemonSource
-from xcodon_runtime.errors import ImageNotFound, PullError
+from xcodon_runtime.errors import ImageNotFound, PullError, XcodonError
 from xcodon_runtime.flatten import build_rootfs
 from xcodon_runtime.home import RuntimeHome
+from xcodon_runtime.layerdiff import hash_layer_dir, link_tree
 from xcodon_runtime.reference import Platform, host_platform, parse_reference
 from xcodon_runtime.registry import FetchedImage, RegistryClient
 from xcodon_runtime.tarlayer import extract_layer, open_layer_stream
 
 log = logging.getLogger(__name__)
+
+LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar"
+
+
+def apply_config_changes(config: dict, changes: dict) -> None:
+    """Apply docker-style config changes in place: Env merges by key, Labels merge, others replace."""
+    cfg = config.setdefault("config", {})
+    for key, value in (changes or {}).items():
+        if key == "Env":
+            merged: dict[str, str] = {}
+            for item in list(cfg.get("Env") or []) + list(value):
+                k, _, v = item.partition("=")
+                merged[k] = v
+            cfg["Env"] = [f"{k}={v}" for k, v in merged.items()]
+        elif key == "Labels":
+            cfg["Labels"] = {**(cfg.get("Labels") or {}), **value}
+        elif key in ("Cmd", "Entrypoint", "WorkingDir", "User"):
+            cfg[key] = value
+        else:
+            raise XcodonError(f"unsupported config change {key!r}")
 
 
 @dataclass
@@ -71,6 +94,17 @@ class ImageStore:
 
     def images(self) -> list[Image]:
         return [self._load(p.name) for p in sorted(self.home.images.iterdir()) if not p.name.endswith(".tmp")]
+
+    def layer_dirs(self, image: Image) -> list[Path]:
+        """The extracted layer directories of an image, in order."""
+        manifest = json.loads((image.dir / "manifest.json").read_text())
+        dirs = []
+        for diff_id in manifest.get("diff_ids", []):
+            d = self.home.layers / diff_id.split(":", 1)[1]
+            if not d.is_dir():
+                raise XcodonError(f"layer {diff_id[:19]} of image {image.short_id} is missing; pull the image again")
+            dirs.append(d)
+        return dirs
 
     # -- pull --------------------------------------------------------------------
 
@@ -133,10 +167,7 @@ class ImageStore:
                 layer.blob_path.unlink(missing_ok=True)
             (self.home.blobs / image_id).unlink(missing_ok=True)
 
-            with self.home.lock("refs"):
-                refs = self.home.read_refs()
-                refs[ref_name] = image_id
-                self.home.write_refs(refs)
+            self._set_ref(ref_name, image_id)
             return self._load(image_id)
 
     def _ensure_layer(self, diff_id: str, blob_path: Path) -> Path:
@@ -153,6 +184,68 @@ class ImageStore:
                 if skipped:
                     log.info("layer %s: skipped %d special entries", hexdigest[:12], skipped)
         return dest
+
+    # -- commit / tag --------------------------------------------------------------
+
+    def commit(self, base: Image, layer_dir: Path | None, *, changes: dict | None = None,
+               ref: str | None = None, created_by: str = "") -> Image:
+        """Compose a new image from ``base`` plus one layer directory and config changes.
+
+        ``layer_dir`` is an OCI layer directory (whiteouts as ``.wh.`` files) or None for a
+        config-only image. Holds ``store`` shared like a pull. Lock order: store -> layer/image/refs.
+        """
+        with self.home.lock("store", shared=True):
+            base_dirs = self.layer_dirs(base)
+            config = copy.deepcopy(base.config)
+            apply_config_changes(config, changes or {})
+            diff_ids = list(config.setdefault("rootfs", {}).setdefault("diff_ids", []))
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if layer_dir is not None:
+                diff_id = hash_layer_dir(layer_dir)
+                hexd = diff_id.split(":", 1)[1]
+                dest = self.home.layers / hexd
+                if not dest.exists():
+                    with self.home.lock(f"layer-{hexd}"):
+                        if not dest.exists():
+                            with self.home.atomic_dir(dest) as tmp:
+                                link_tree(layer_dir, tmp)
+                diff_ids.append(diff_id)
+                base_dirs = base_dirs + [dest]
+            config["rootfs"]["diff_ids"] = diff_ids
+            config["created"] = now
+            config.setdefault("history", []).append(
+                {"created": now, "created_by": created_by or "xrunner commit", "empty_layer": layer_dir is None})
+            canonical = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+            image_id = hashlib.sha256(canonical).hexdigest()
+            image_dir = self.home.images / image_id
+            with self.home.lock(f"image-{image_id}"):
+                if not image_dir.exists():
+                    with self.home.atomic_dir(image_dir) as tmp:
+                        (tmp / "config.json").write_text(json.dumps(config, indent=2))
+                        (tmp / "manifest.json").write_text(json.dumps({
+                            "config": f"sha256:{image_id}", "diff_ids": diff_ids,
+                            "layers": [{"digest": d, "mediaType": LAYER_MEDIA_TYPE, "size": 0} for d in diff_ids],
+                            "source": "commit", "parent": base.id,
+                        }, indent=2))
+                        build_rootfs(base_dirs, tmp / "rootfs")
+            if ref:
+                self._set_ref(ref, image_id)
+            return self._load(image_id)
+
+    def _set_ref(self, ref: str, image_id: str) -> None:
+        name = parse_reference(ref).name
+        with self.home.lock("refs"):
+            refs = self.home.read_refs()
+            refs[name] = image_id
+            self.home.write_refs(refs)
+
+    def tag(self, ref_or_id: str, new_ref: str) -> Image:
+        img = self.require(ref_or_id)
+        self._set_ref(new_ref, img.id)
+        return self._load(img.id)
+
+    def untagged(self) -> list[Image]:
+        return [i for i in self.images() if not i.refs]
 
     # -- remove / inspect / prune ------------------------------------------------
 
@@ -220,6 +313,10 @@ class ImageStore:
                     blob.unlink(missing_ok=True)
                     removed.append(blob)
             if all:
+                for img in self.untagged():
+                    with self.home.lock(f"image-{img.id}"):
+                        shutil.rmtree(img.dir, ignore_errors=True)
+                    removed.append(img.dir)
                 used: set[str] = set()
                 for img in self.images():
                     manifest = json.loads((img.dir / "manifest.json").read_text())

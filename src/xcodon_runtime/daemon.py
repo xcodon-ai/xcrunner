@@ -122,6 +122,16 @@ class DaemonSource:
             return False
         return r.returncode == 0
 
+    def image_id(self, ref: Reference) -> str | None:
+        """The daemon's image id for a tag (``sha256:<hex>``), or None if it has no such tag."""
+        try:
+            r = subprocess.run([self.docker, "image", "inspect", "--format", "{{.Id}}", ref.name],
+                               capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        out = r.stdout.strip()
+        return out if r.returncode == 0 and out.startswith("sha256:") else None
+
     def fetch(self, ref: Reference, platform: Platform) -> FetchedImage:
         log.info("exporting %s from the local docker daemon", ref.name)
         err = tempfile.TemporaryFile()
