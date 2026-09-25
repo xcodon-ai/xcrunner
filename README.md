@@ -45,7 +45,11 @@ Two global flags come before the subcommand: `--engine ns|proot` forces an
 engine, and `--home DIR` picks the state directory for this one command.
 
 Images already in a local Docker daemon are reused through `docker save`, so
-locally built images work without a registry.
+locally built images work without a registry. xrunner records the daemon's
+image id at import. When the daemon's tag later points at another image
+(for example after a `docker build` there), the next `run`, `create`, or
+`build` that uses the tag imports it again. `--pull never` and image ids
+skip this check.
 
 ## Build and commit
 
@@ -54,9 +58,22 @@ locally built images work without a registry.
     xrunner tag myapp:2 myapp:latest
 
 `xrunner build` runs each Dockerfile instruction in its own container and
-commits one image per step, so unchanged steps are cached. `xrunner commit`
-also works on an `--env-dir` folder instead of a container:
-`xrunner commit --env-dir $PWD/.xrunner-env --image myapp:1 myapp:2`.
+commits one image per step, so unchanged steps are cached. The cache lives
+in `<home>/build-cache.json`. The step images are untagged, and
+`xrunner prune --all` removes untagged images, which empties the cache in
+effect. `xrunner commit` also works on an `--env-dir` folder instead of a
+container: `xrunner commit --env-dir $PWD/.xrunner-env --image myapp:1 myapp:2`.
+
+Docker-style names work too:
+
+    xrunner image inspect myapp:1                       # also: image ls, image rm
+    xrunner docker build -t myapp:1 .                   # any docker verb xrunner supports
+    xrunner docker image inspect --format '{{.Id}}' myapp:1
+
+`xrunner docker VERB ...` takes docker's own verbs and flags for `build`,
+`image inspect|ls|rm`, `images`, `rmi`, `tag`, `pull`, `run`, `create`,
+`start`, `exec`, `stop`, `rm`, `ps`, `logs`, `commit`, `inspect`, `version`, and
+`info`. Other verbs exit with code 125 and a message.
 
 For tools that shell out to a real `docker` binary directly — running
 `docker build` or `docker image inspect` as a subprocess, rather than going
@@ -68,9 +85,12 @@ a `docker` script that forwards every call to `xrunner docker`:
     docker build -t myapp:1 .
     docker image inspect myapp:1
 
-The shim refuses to overwrite a real `docker` already on PATH unless you
-pass `--force`. xrunner also never mistakes its own shim for a real Docker
-daemon: image pulls that would reuse a local `docker save` skip a shim.
+The shim refuses to install while any real `docker` is anywhere on PATH,
+even outside DIR, unless you pass `--force`. It also refuses to replace a
+`DIR/docker` that is not an xrunner shim unless you pass `--force`, and it
+never replaces a directory. xrunner also never mistakes its own shim for a
+real Docker daemon: image pulls that would reuse a local `docker save` skip
+a shim.
 
 Limits on the Dockerfile subset: no multi-stage builds (a second `FROM`, or
 `--from=`), no `.dockerignore`, and no remote `ADD`/`COPY` from a URL.

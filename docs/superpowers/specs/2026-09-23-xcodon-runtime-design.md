@@ -497,6 +497,17 @@ v5.4.1 static build. Total under 2 MB.
   path stays writable, because the remount is not recursive.
 - Path length: overlayfs mount options are limited to one page. With a single
   lower directory this is never reached.
+- The proot engine takes no env-layer lock (only the ns keeper does), so
+  `commit --env-dir` of a proot env layer that a container is using can
+  capture a tree in the middle of a write.
+- Image import clears the setuid, setgid, sticky, and group/other write
+  bits, so a world-writable directory such as `/tmp` becomes 0755 instead
+  of 1777. The container's one uid owns every file, including under a
+  non-root `USER` (checked on both engines with `USER 1000` and
+  `touch /tmp/x`), so the container user can still write there. Only a
+  process under some other uid could not, and the single-uid mapping
+  allows no such process; a tool that checks for mode 1777 sees the
+  difference.
 
 ## 7. Error handling
 
@@ -693,13 +704,20 @@ old image under that tag.
 base image, and registers the result under a tag.
 
 - Sources: a stopped container (`xrunner commit CONTAINER TAG`) or an env
-  folder layer (`xrunner commit --env-dir DIR IMAGE TAG`). A layer that is in
+  folder layer (`xrunner commit --env-dir DIR --image IMAGE TAG`). A layer that is in
   use, a running container or a locked env layer, is refused.
 - ns engine: the overlay upper directory is translated to OCI form. A
   character device 0:0 becomes a `.wh.<name>` marker; a directory carrying
   the `user.overlay.opaque` or `trusted.overlay.opaque` attribute gets a
-  `.wh..wh..opq` marker; other `overlay.*` attributes are dropped; regular
-  files are hardlinked, symlinks recreated, other special files skipped.
+  `.wh..wh..opq` marker; other `overlay.*` attributes are dropped; symlinks
+  are recreated, other special files skipped. The empty mountpoints the
+  keeper creates for its own mounts and for bind targets (for example
+  `/etc/hosts`, and a bind target's missing parents) are dropped when the
+  base image lacks them.
+- Regular files are copied from the writable source into a snapshot
+  directory, never hardlinked: the source stays writable, and a hardlink
+  would let a later write change the committed layer. The snapshot's files
+  are hardlinked only when it moves into the layer store.
 - proot engine: the rootfs copy is compared with the image rootfs. Entries
   that differ in type, size, mode, mtime, or link target, or are new, go in
   the layer; entries missing from the copy become `.wh.` markers.
@@ -710,7 +728,8 @@ base image, and registers the result under a tag.
   `WORKDIR`, `USER`, `LABEL`). The image id is the SHA-256 of the canonical
   config JSON, as for pulled images. The image directory is built like a
   pulled one, with `manifest.json` `source: "commit"` and the parent id.
-- A commit with no layer changes, only config changes, appends no diff id.
+- A commit whose snapshot is empty (no layer changes, only config changes)
+  appends no diff id; its history entry has `empty_layer: true`.
 
 ### 11.3 Build
 
@@ -751,9 +770,15 @@ runs a Dockerfile subset entirely in xrunner containers.
 
 When resolving a tag with `pull="missing"`, if the stored image came from a
 local daemon (`manifest.json` source `daemon`) and the daemon is available
-and has the tag, xrunner compares the daemon's image id with the stored id
-and re-imports on mismatch. Locally built and committed images are never
-replaced by this check.
+and has the tag, xrunner compares the daemon's current image id
+(`docker image inspect --format {{.Id}}`) with the id recorded at import
+(`manifest.json` `daemon_id`) and re-imports on mismatch. The daemon's id is
+never compared with xrunner's own image id: with docker's containerd image
+store it is the manifest digest, not the config digest. An image imported
+before `daemon_id` existed is re-imported once to record it. If a re-import
+fails, xrunner logs a warning and uses the stored image. `pull="never"` and
+refs that are image ids skip the check. Locally built and committed images
+are never replaced by this check.
 
 ### 11.6 Out of scope
 
