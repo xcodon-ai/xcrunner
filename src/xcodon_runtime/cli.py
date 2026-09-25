@@ -8,10 +8,7 @@ import json
 import logging
 import os
 import re
-import shlex
-import shutil
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
@@ -19,7 +16,7 @@ from pathlib import Path
 from xcodon_runtime import __version__
 from xcodon_runtime.api import Runtime
 from xcodon_runtime.imagestore import env_to_dict
-from xcodon_runtime.daemon import SHIM_MARKER, is_shim, resolve_docker
+from xcodon_runtime.daemon import SHIM_MARKER
 from xcodon_runtime.engine import Bind
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.keeper import KEEPER_LOG
@@ -512,47 +509,25 @@ def cmd_conda(rt: Runtime, args) -> int:
 
 
 def cmd_shim(rt: Runtime, args) -> int:
+    from xcodon_runtime.micromamba import install_micromamba
+    from xcodon_runtime.shim import CONDA_MARKER, CONDA_NAMES, check_install, path_hint, write_shim
+
     target_dir = Path(args.dir or os.path.dirname(sys.executable)).expanduser().resolve()
-    shim_path = target_dir / SHIM_NAME
-    if not args.force:
-        # Anywhere on PATH: reuses daemon.py's own shim-aware resolver, so a stale shim
-        # earlier in PATH cannot hide a real docker installed further along it.
-        real_on_path = resolve_docker(SHIM_NAME)
-        if real_on_path:
-            raise UsageError(f"a real docker is on PATH at {real_on_path}; pass --force to install the shim anyway")
-        # DIR itself, even when DIR is not on PATH at all: `os.path.lexists` so a
-        # symlink is detected without following it, and `is_shim` decides purely from
-        # the 512-byte marker check, never from where a symlink points.
-        if os.path.lexists(shim_path) and not is_shim(str(shim_path)):
-            raise UsageError(f"{shim_path} already exists and is not an xrunner shim; "
-                              f"pass --force to overwrite it")
-    xrunner = os.path.join(os.path.dirname(sys.executable), "xrunner")
-    if not os.access(xrunner, os.X_OK):
-        xrunner = shutil.which("xrunner") or "xrunner"
-    if shim_path.is_dir() and not shim_path.is_symlink():
-        # os.replace cannot put a file over a directory, even with --force.
-        raise UsageError(f"{shim_path} is a directory; remove it first")
-    target_dir.mkdir(parents=True, exist_ok=True)
-    script = f"#!/bin/sh\n{SHIM_MARKER}\nexec {shlex.quote(xrunner)} docker \"$@\"\n"
-    # Write to a temp file in the same directory, then `os.replace` it onto the final
-    # name: that swaps the directory entry atomically, so an existing symlink at
-    # `shim_path` is replaced rather than opened and written through (which would
-    # instead overwrite whatever real docker binary it points at).
-    fd, tmp_name = tempfile.mkstemp(dir=target_dir, prefix=".docker-shim-")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(script)
-        os.chmod(tmp_name, 0o755)
-        os.replace(tmp_name, shim_path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-    print(f"installed {shim_path}")
-    if str(target_dir) not in os.environ.get("PATH", "").split(os.pathsep):
-        print(f'add it to PATH: export PATH="{target_dir}:$PATH"')
+    if args.kind == "docker":
+        if args.micromamba:
+            raise UsageError("--micromamba only applies to `xrunner shim install conda`")
+        check_install(target_dir, [SHIM_NAME], args.force)
+        written = [write_shim(target_dir, SHIM_NAME, SHIM_MARKER, "docker")]
+    else:
+        check_install(target_dir, CONDA_NAMES, args.force)
+        source = Path(args.micromamba).expanduser() if args.micromamba else None
+        print(f"micromamba at {install_micromamba(rt.home, source=source)}")
+        written = [write_shim(target_dir, name, CONDA_MARKER, "conda") for name in CONDA_NAMES]
+    for path in written:
+        print(f"installed {path}")
+    hint = path_hint(target_dir)
+    if hint:
+        print(hint)
     return 0
 
 
@@ -675,11 +650,13 @@ def build_parser() -> argparse.ArgumentParser:
                        add_help=False)
     s.set_defaults(func=cmd_conda, rest=[])
 
-    s = sub.add_parser("shim", help="install a docker command that forwards to xrunner")
+    s = sub.add_parser("shim", help="install docker or conda commands that forward to xrunner")
     ssub = s.add_subparsers(dest="shim_cmd", required=True)
-    i = ssub.add_parser("install", help="write a docker script that forwards to `xrunner docker`")
-    i.add_argument("--dir", help="where to write it (default: beside the xrunner executable)")
-    i.add_argument("--force", action="store_true", help="overwrite even if a real docker is already on PATH")
+    i = ssub.add_parser("install", help="write docker (default) or conda/mamba/micromamba scripts")
+    i.add_argument("kind", nargs="?", choices=("docker", "conda"), default="docker")
+    i.add_argument("--dir", help="where to write them (default: beside the xrunner executable)")
+    i.add_argument("--force", action="store_true", help="install even if a real one is already on PATH")
+    i.add_argument("--micromamba", help="conda only: copy this micromamba binary instead of downloading the pinned one")
     i.set_defaults(func=cmd_shim)
     return p
 

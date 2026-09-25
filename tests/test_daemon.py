@@ -232,6 +232,11 @@ def test_daemon_source_fetch_reports_the_reader_error_when_docker_is_silent(home
 
 
 def test_shim_helpers_are_public():
-    from xcodon_runtime import cli, daemon
+    """is_shim/resolve_docker stay daemon internals (daemon.py itself still uses them);
+    the shared, public shim API is now xcodon_runtime.shim, whose marker set recognizes
+    daemon's own docker marker, so a docker shim written through shim.write_shim is
+    still a shim daemon.is_shim/resolve_docker will skip."""
+    from xcodon_runtime import daemon, shim
 
-    assert cli.is_shim is daemon.is_shim and cli.resolve_docker is daemon.resolve_docker
+    assert daemon.is_shim is not None and daemon.resolve_docker is not None
+    assert daemon.SHIM_MARKER in shim.MARKERS and shim.DOCKER_MARKER == daemon.SHIM_MARKER

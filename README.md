@@ -95,6 +95,29 @@ a shim.
 Limits on the Dockerfile subset: no multi-stage builds (a second `FROM`, or
 `--from=`), no `.dockerignore`, and no remote `ADD`/`COPY` from a URL.
 
+## Tools without conda
+
+Agents often install command-line tools with `conda create`, `conda install` and
+`conda run`. On a host with no conda, xrunner can answer those calls itself:
+
+    xrunner shim install conda --dir ~/.xcodon/shim
+    export PATH="$HOME/.xcodon/shim:$PATH"
+
+This downloads a pinned micromamba (2.9.0, from conda-forge, checksum-verified) and
+writes `conda`, `mamba` and `micromamba` scripts that forward to `xrunner conda`.
+Offline, pass `--micromamba PATH` to use a binary you already have.
+
+- Environments live in the project's `.xrunner-env/conda` (found from the working
+  directory, or from `XRUNNER_ENV_DIR`), else under the xrunner home. Downloads are
+  cached once under the xrunner home.
+- Your own `~/.conda` and `~/.condarc` are never read or written.
+- `conda run -n NAME CMD` runs CMD with the env on PATH; `conda activate` is not
+  supported, because it changes the calling shell.
+- Each env gets `conda-explicit.txt`, listing every package URL and checksum, so it
+  can be rebuilt with `conda create -p PATH --file conda-explicit.txt`.
+- The shim refuses to install while a real conda, mamba or micromamba is on PATH,
+  unless you pass `--force`.
+
 ## Hosts without docker
 
 On a host with no docker daemon, a `FROM` name that only ever existed in a
