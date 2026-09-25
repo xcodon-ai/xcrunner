@@ -74,6 +74,31 @@ def build_mount_steps(plan: dict, old_name: str) -> list[tuple[str, ...]]:
     return steps
 
 
+def mount_targets(binds: list[dict]) -> list[str]:
+    """Guest paths the keeper mounts on, and so may create in the container's upper layer.
+
+    Taken from ``build_mount_steps`` itself, so the list never drifts from
+    what the keeper does. A target under a tmpfs target (everything below
+    ``/dev``) lives on that tmpfs and never reaches the upper layer, so it
+    is left out. ``commit`` uses this to drop the empty mountpoint
+    placeholders these mounts leave behind.
+    """
+    steps = build_mount_steps({"merged": "/", "binds": binds, "workdir": "/"}, "oldroot")
+    tmpfs = [step[1] for step in steps if step[0] == "tmpfs"]
+    targets: list[str] = []
+    for step in steps:
+        if step[0] in ("tmpfs", "devpts", "shm", "proc"):
+            target = step[1]
+        elif step[0] == "bind":
+            target = step[2]
+        else:
+            continue
+        if any(target.startswith(m.rstrip("/") + "/") for m in tmpfs):
+            continue
+        targets.append(target)
+    return targets
+
+
 def _setup_sandbox(steps: list[tuple[str, ...]], old_name: str) -> None:
     """Run the mount steps, from inside the new root once the pivot step is done.
 

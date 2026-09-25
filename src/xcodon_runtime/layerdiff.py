@@ -158,6 +158,70 @@ def snapshot_upper(upper: Path, dest: Path) -> int:
     return count
 
 
+def _base_entry(base_rootfs: Path, parts: list[str]) -> os.stat_result | None | bool:
+    """``lstat`` of a guest path in the base rootfs, walked one component at a time.
+
+    Returns None when the path does not exist there, and True (meaning
+    "something else is there; keep the entry") when a parent component is
+    not a real directory: the host kernel is never asked to follow an image
+    symlink.
+    """
+    cur = base_rootfs
+    for i, part in enumerate(parts):
+        cur = cur / part
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return True
+        if i == len(parts) - 1:
+            return st
+        if not stat.S_ISDIR(st.st_mode):
+            return True
+    return True
+
+
+def drop_mount_placeholders(layer: Path, base_rootfs: Path, targets: list[str]) -> int:
+    """Remove the empty mountpoints an ns keeper left in a snapshot of its upper layer.
+
+    The keeper creates an empty file or directory (and any missing parent)
+    for each mount target the image lacks, for example ``/etc/hosts``. At
+    each target and each of its parents, an entry is dropped when it is an
+    empty regular file or an empty directory and the base rootfs has
+    nothing at that path. An empty directory is also dropped when the base
+    has a directory there with the same mode: that is only overlayfs
+    copying up a parent, and applying it changes nothing. Deepest paths go
+    first, so a parent emptied by an earlier drop goes too. ``targets`` are
+    guest paths; symlinks in the base are never followed on the host.
+    Returns the number of entries removed.
+    """
+    paths: set[tuple[str, ...]] = set()
+    for target in targets:
+        parts = [p for p in os.path.normpath("/" + target.lstrip("/")).split("/") if p]
+        for i in range(1, len(parts) + 1):
+            paths.add(tuple(parts[:i]))
+    removed = 0
+    for parts in sorted(paths, key=len, reverse=True):
+        entry = layer.joinpath(*parts)
+        try:
+            st = os.lstat(entry)
+        except OSError:
+            continue
+        base = _base_entry(base_rootfs, list(parts))
+        if base is True:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_size == 0 and base is None:
+            entry.unlink()
+            removed += 1
+        elif stat.S_ISDIR(st.st_mode) and not os.listdir(entry):
+            if base is None or (stat.S_ISDIR(base.st_mode)
+                                and stat.S_IMODE(base.st_mode) == stat.S_IMODE(st.st_mode)):
+                entry.rmdir()
+                removed += 1
+    return removed
+
+
 def _same_file(a: Path, b: Path, sa: os.stat_result, sb: os.stat_result) -> bool:
     if stat.S_IFMT(sa.st_mode) != stat.S_IFMT(sb.st_mode):
         return False

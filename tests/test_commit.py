@@ -212,3 +212,81 @@ def test_commit_holds_store_shared_while_its_scratch_dir_exists(home, busybox_im
     finally:
         rt.remove(c)
     assert seen == ["held"]
+
+
+# -- final review, item 4: an unchanged commit adds no layer ---------------------
+
+def test_unchanged_container_commit_adds_no_layer(home, busybox_image, engine_name, tmp_path):
+    from xcodon_runtime.engine import Bind
+
+    rt = Runtime(home.path, engine=engine_name)
+    hostdir = tmp_path / "hostdata"
+    hostdir.mkdir()
+    # A bind target the image lacks, under a parent it lacks too: the ns
+    # keeper creates both as mountpoints in the upper layer.
+    c = rt.create("xcodon-test/busybox", command=["/bin/true"],
+                  binds=[Bind(str(hostdir), "/data/in")])
+    rt.start(c)
+    try:
+        assert rt.exec(c, ["/bin/true"]).code == 0
+    finally:
+        rt.stop(c)
+    try:
+        img = rt.commit(c, "xcodon-test/unchanged:1")
+    finally:
+        rt.remove(c)
+    assert img.config["rootfs"]["diff_ids"] == busybox_image.config["rootfs"]["diff_ids"]
+    assert img.config["history"][-1]["empty_layer"] is True
+    assert not (img.rootfs / "data").exists()
+
+
+def test_changed_container_commit_adds_one_layer(home, busybox_image, engine_name):
+    rt = Runtime(home.path, engine=engine_name)
+    c = rt.create("xcodon-test/busybox", command=["/bin/true"])
+    rt.start(c)
+    try:
+        assert rt.exec(c, ["/bin/sh", "-c", "echo x > /etc/added"]).code == 0
+    finally:
+        rt.stop(c)
+    try:
+        img = rt.commit(c, "xcodon-test/changed:1")
+    finally:
+        rt.remove(c)
+    base_ids = busybox_image.config["rootfs"]["diff_ids"]
+    assert img.config["rootfs"]["diff_ids"][:-1] == base_ids
+    assert len(img.config["rootfs"]["diff_ids"]) == len(base_ids) + 1
+    assert img.config["history"][-1]["empty_layer"] is False
+    assert (img.rootfs / "etc" / "added").read_text() == "x\n"
+
+
+def test_drop_mount_placeholders_rules(tmp_path):
+    import os
+
+    from xcodon_runtime.keeper import mount_targets
+    from xcodon_runtime.layerdiff import drop_mount_placeholders
+
+    base = tmp_path / "base"
+    (base / "etc").mkdir(parents=True)
+    os.chmod(base / "etc", 0o755)
+    (base / "etc" / "resolv.conf").write_text("")  # an empty file the image ships
+    layer = tmp_path / "layer"
+    (layer / "etc").mkdir(parents=True)
+    os.chmod(layer / "etc", 0o755)
+    (layer / "etc" / "hosts").touch()  # placeholder: not in the base
+    (layer / "etc" / "resolv.conf").touch()  # in the base: kept
+    (layer / "proc").mkdir()
+    (layer / "sys").mkdir()
+    (layer / "data" / "in").mkdir(parents=True)
+    (layer / "opt").mkdir()
+    (layer / "opt" / "empty").touch()  # not a mount target: kept
+    targets = mount_targets([{"source": "/h", "target": "/data/in"}])
+    assert "/etc/hosts" in targets and "/data/in" in targets and "/proc" in targets
+    assert not any(t.startswith("/dev/") for t in targets), "/dev/* lives on the keeper's tmpfs"
+    drop_mount_placeholders(layer, base, targets)
+    remaining = sorted(str(p.relative_to(layer)) for p in layer.rglob("*"))
+    assert remaining == ["etc", "etc/resolv.conf", "opt", "opt/empty"]
+
+    # A non-empty placeholder is a real change and stays.
+    (layer / "etc" / "hosts").write_text("127.0.0.1 me\n")
+    drop_mount_placeholders(layer, base, targets)
+    assert (layer / "etc" / "hosts").exists()

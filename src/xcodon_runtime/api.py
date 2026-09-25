@@ -26,7 +26,7 @@ from xcodon_runtime.envdir import ENV_LOCK_NAME, env_layer_dir
 from xcodon_runtime.errors import ContainerNotRunning, ImageNotFound, XcodonError
 from xcodon_runtime.home import RuntimeHome
 from xcodon_runtime.imagestore import Image, ImageStore
-from xcodon_runtime.layerdiff import snapshot_diff, snapshot_upper
+from xcodon_runtime.layerdiff import drop_mount_placeholders, snapshot_diff, snapshot_upper
 from xcodon_runtime.reference import Platform, parse_reference
 from xcodon_runtime.spec import build_spec
 
@@ -294,6 +294,7 @@ class Runtime:
                     raise XcodonError(f"container {container.short_id} is running; stop it before commit")
                 if container.env_dir:
                     env_lock_fd = _lock_env_layer(env_layer_dir(container.env_dir, container.image_id))
+                binds = [b.to_dict() for b in container.binds]
                 if container.engine == "ns":
                     from xcodon_runtime.engine_ns import NsEngine
                     upper, _ = NsEngine().layer_paths(container)
@@ -308,6 +309,7 @@ class Runtime:
                 if not layer.is_dir():
                     raise XcodonError(f"no env layer for image {base.short_id} under {env_dir}")
                 env_lock_fd = _lock_env_layer(layer)
+                binds = []  # unknown here; the keeper's fixed mounts are still dropped
                 source = ("upper", layer / "upper") if (layer / "upper").is_dir() else ("rootfs", layer / "rootfs")
                 created_by = message or f"xrunner commit --env-dir {env_dir}"
             else:
@@ -323,10 +325,15 @@ class Runtime:
                 try:
                     layer_dir = work / "layer"
                     if kind == "upper":
+                        from xcodon_runtime.keeper import mount_targets
                         snapshot_upper(path, layer_dir)
+                        drop_mount_placeholders(layer_dir, base.rootfs, mount_targets(binds))
                     else:
                         snapshot_diff(path, base.rootfs, layer_dir)
-                    return self.images.commit(base, layer_dir, changes=changes, ref=tag, created_by=created_by)
+                    # Spec 11.2: an unchanged container commits config only, no layer.
+                    has_changes = any(layer_dir.iterdir())
+                    return self.images.commit(base, layer_dir if has_changes else None, changes=changes,
+                                              ref=tag, created_by=created_by)
                 finally:
                     _rmtree_tolerant(work)
         finally:
