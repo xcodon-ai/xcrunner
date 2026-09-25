@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from xcodon_runtime.errors import XcodonError
+from xcodon_runtime.imagestore import env_to_dict
 
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -110,10 +111,7 @@ def build_spec(
 
     uid, gid = resolve_user(user if user is not None else cfg.get("User"), rootfs)
 
-    merged: dict[str, str] = {}
-    for item in cfg.get("Env") or []:
-        k, _, v = item.partition("=")
-        merged[k] = v
+    merged = env_to_dict(cfg.get("Env"))
     merged["HOSTNAME"] = container_id[:12]
     merged.setdefault("HOME", _home_for(uid, rootfs))
     if env:

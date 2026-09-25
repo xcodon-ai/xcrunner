@@ -290,3 +290,11 @@ def test_drop_mount_placeholders_rules(tmp_path):
     (layer / "etc" / "hosts").write_text("127.0.0.1 me\n")
     drop_mount_placeholders(layer, base, targets)
     assert (layer / "etc" / "hosts").exists()
+
+
+def test_env_to_dict_later_item_wins_and_order_is_kept():
+    from xcodon_runtime.imagestore import env_to_dict
+
+    assert env_to_dict(["A=1", "B=x=y", "A=2", "C="]) == {"A": "2", "B": "x=y", "C": ""}
+    assert list(env_to_dict(["B=1", "A=1"])) == ["B", "A"]
+    assert env_to_dict(None) == {} and env_to_dict([]) == {}

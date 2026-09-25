@@ -26,15 +26,21 @@ log = logging.getLogger(__name__)
 LAYER_MEDIA_TYPE = "application/vnd.oci.image.layer.v1.tar"
 
 
+def env_to_dict(env_list: list[str] | None) -> dict[str, str]:
+    """An image config ``Env`` list (``KEY=value`` items) as a dict. A later item wins; order is kept."""
+    out: dict[str, str] = {}
+    for item in env_list or []:
+        k, _, v = item.partition("=")
+        out[k] = v
+    return out
+
+
 def apply_config_changes(config: dict, changes: dict) -> None:
     """Apply docker-style config changes in place: Env merges by key, Labels merge, others replace."""
     cfg = config.setdefault("config", {})
     for key, value in (changes or {}).items():
         if key == "Env":
-            merged: dict[str, str] = {}
-            for item in list(cfg.get("Env") or []) + list(value):
-                k, _, v = item.partition("=")
-                merged[k] = v
+            merged = env_to_dict(list(cfg.get("Env") or []) + list(value))
             cfg["Env"] = [f"{k}={v}" for k, v in merged.items()]
         elif key == "Labels":
             cfg["Labels"] = {**(cfg.get("Labels") or {}), **value}

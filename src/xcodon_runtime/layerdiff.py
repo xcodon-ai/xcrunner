@@ -25,9 +25,10 @@ import shutil
 import stat
 import tarfile
 from pathlib import Path
+from typing import Callable
 
-WHITEOUT_PREFIX = ".wh."
-OPAQUE = ".wh..wh..opq"
+from xcodon_runtime.flatten import OPAQUE, WHITEOUT_PREFIX
+
 OPAQUE_XATTRS = ("user.overlay.opaque", "trusted.overlay.opaque")
 
 
@@ -90,8 +91,9 @@ def _copy_file(src: Path, dst: Path) -> None:
     _strip_overlay_xattrs(dst)
 
 
-def link_tree(src: Path, dst: Path) -> None:
-    """Recreate ``src`` under ``dst``: directories with their mode, symlinks as is, files hardlinked."""
+def _recreate_tree(src: Path, dst: Path, place_file: Callable[[Path, Path], None]) -> None:
+    """Recreate ``src`` under ``dst``: directories with their mode, symlinks as is,
+    regular files through ``place_file``. Other file types are skipped."""
     mode = stat.S_IMODE(os.lstat(src).st_mode)
     dst.mkdir(parents=True, exist_ok=True)
     os.chmod(dst, 0o700)  # writable while populating; the true mode is restored below
@@ -100,10 +102,15 @@ def link_tree(src: Path, dst: Path) -> None:
         if entry.is_symlink():
             os.symlink(os.readlink(entry.path), target)
         elif entry.is_dir(follow_symlinks=False):
-            link_tree(Path(entry.path), target)
+            _recreate_tree(Path(entry.path), target, place_file)
         elif entry.is_file(follow_symlinks=False):
-            _place_file(Path(entry.path), target)
+            place_file(Path(entry.path), target)
     os.chmod(dst, mode)
+
+
+def link_tree(src: Path, dst: Path) -> None:
+    """Recreate ``src`` under ``dst``: directories with their mode, symlinks as is, files hardlinked."""
+    _recreate_tree(src, dst, _place_file)
 
 
 def _copy_tree(src: Path, dst: Path) -> None:
@@ -113,18 +120,7 @@ def _copy_tree(src: Path, dst: Path) -> None:
     the base: ``src`` is a live, writable rootfs, so hardlinking it in would
     let a later write mutate the already-committed layer.
     """
-    mode = stat.S_IMODE(os.lstat(src).st_mode)
-    dst.mkdir(parents=True, exist_ok=True)
-    os.chmod(dst, 0o700)  # writable while populating; the true mode is restored below
-    for entry in sorted(os.scandir(src), key=lambda e: e.name):
-        target = dst / entry.name
-        if entry.is_symlink():
-            os.symlink(os.readlink(entry.path), target)
-        elif entry.is_dir(follow_symlinks=False):
-            _copy_tree(Path(entry.path), target)
-        elif entry.is_file(follow_symlinks=False):
-            _copy_file(Path(entry.path), target)
-    os.chmod(dst, mode)
+    _recreate_tree(src, dst, _copy_file)
 
 
 def snapshot_upper(upper: Path, dest: Path) -> int:

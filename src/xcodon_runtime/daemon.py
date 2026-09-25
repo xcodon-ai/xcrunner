@@ -26,7 +26,8 @@ CHUNK = 1 << 20
 SHIM_MARKER = "# docker shim installed by xrunner"
 
 
-def _is_shim(path: str) -> bool:
+def is_shim(path: str) -> bool:
+    """True when ``path`` is a file that carries the xrunner shim marker near its start."""
     try:
         with open(path, "rb") as f:
             return SHIM_MARKER.encode() in f.read(512)
@@ -34,13 +35,13 @@ def _is_shim(path: str) -> bool:
         return False
 
 
-def _resolve_docker(name: str) -> str | None:
+def resolve_docker(name: str) -> str | None:
     """Find an executable docker, like shutil.which, but skip an xrunner-installed shim."""
     candidates = [name] if os.path.isabs(name) else [
         os.path.join(d, name) for d in os.environ.get("PATH", "").split(os.pathsep) if d
     ]
     for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK) and not _is_shim(candidate):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK) and not is_shim(candidate):
             return candidate
     return None
 
@@ -132,7 +133,7 @@ class DaemonSource:
     def _exe(self) -> str | None:
         """The resolved docker executable, or None. Same resolution in every method here,
         so a shim on PATH is never mistaken for the real thing in one call but not another."""
-        return _resolve_docker(self.docker)
+        return resolve_docker(self.docker)
 
     def available(self) -> bool:
         exe = self._exe()

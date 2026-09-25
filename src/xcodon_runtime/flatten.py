@@ -9,6 +9,7 @@ import stat
 from pathlib import Path
 from typing import Sequence
 
+# OCI whiteout names, shared with layerdiff (which writes them).
 WHITEOUT_PREFIX = ".wh."
 OPAQUE = ".wh..wh..opq"
 

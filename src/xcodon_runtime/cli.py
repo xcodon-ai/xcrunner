@@ -18,7 +18,8 @@ from pathlib import Path
 
 from xcodon_runtime import __version__
 from xcodon_runtime.api import Runtime
-from xcodon_runtime.daemon import SHIM_MARKER, _is_shim, _resolve_docker
+from xcodon_runtime.imagestore import env_to_dict
+from xcodon_runtime.daemon import SHIM_MARKER, is_shim, resolve_docker
 from xcodon_runtime.engine import Bind
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.keeper import KEEPER_LOG
@@ -429,15 +430,6 @@ def cmd_build(rt: Runtime, args) -> int:
     return 0
 
 
-def _image_env_scope(img) -> dict[str, str]:
-    """The image's own Env, as a mapping, for expanding `$VAR` in a `commit -c` change."""
-    scope: dict[str, str] = {}
-    for item in img.config.get("config", {}).get("Env") or []:
-        k, _, v = item.partition("=")
-        scope[k] = v
-    return scope
-
-
 def _parse_change(spec: str, scope: dict[str, str]) -> dict:
     from xcodon_runtime.build import DEFAULT_SHELL, parse_command, parse_env
 
@@ -476,15 +468,14 @@ def cmd_commit(rt: Runtime, args) -> int:
     # A mutable copy: each `-c ENV ...` change updates it, so a later `-c` sees the
     # variables an earlier one just set (`-c 'ENV A=1' -c 'ENV B=$A'` gives B=1), not
     # just the base image's own Env.
-    scope = _image_env_scope(base)
+    # The image's own Env, for expanding `$VAR` in a `commit -c` change.
+    scope = env_to_dict(base.config.get("config", {}).get("Env"))
     changes: dict = {}
     for spec in args.change or []:
         for k, v in _parse_change(spec, scope).items():
             if k == "Env":
                 changes.setdefault("Env", []).extend(v)
-                for item in v:
-                    ek, _, ev = item.partition("=")
-                    scope[ek] = ev
+                scope.update(env_to_dict(v))
             elif k == "Labels":
                 changes.setdefault("Labels", {}).update(v)
             else:
@@ -514,13 +505,13 @@ def cmd_shim(rt: Runtime, args) -> int:
     if not args.force:
         # Anywhere on PATH: reuses daemon.py's own shim-aware resolver, so a stale shim
         # earlier in PATH cannot hide a real docker installed further along it.
-        real_on_path = _resolve_docker(SHIM_NAME)
+        real_on_path = resolve_docker(SHIM_NAME)
         if real_on_path:
             raise UsageError(f"a real docker is on PATH at {real_on_path}; pass --force to install the shim anyway")
         # DIR itself, even when DIR is not on PATH at all: `os.path.lexists` so a
-        # symlink is detected without following it, and `_is_shim` decides purely from
+        # symlink is detected without following it, and `is_shim` decides purely from
         # the 512-byte marker check, never from where a symlink points.
-        if os.path.lexists(shim_path) and not _is_shim(str(shim_path)):
+        if os.path.lexists(shim_path) and not is_shim(str(shim_path)):
             raise UsageError(f"{shim_path} already exists and is not an xrunner shim; "
                               f"pass --force to overwrite it")
     xrunner = os.path.join(os.path.dirname(sys.executable), "xrunner")

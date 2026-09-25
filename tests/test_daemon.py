@@ -229,3 +229,9 @@ def test_daemon_source_fetch_reports_the_reader_error_when_docker_is_silent(home
     src = DaemonSource(home, docker=str(fake))
     with pytest.raises(PullError, match="no index.json"):
         src.fetch(Reference("docker.io", "library/test", "latest"), Platform())
+
+
+def test_shim_helpers_are_public():
+    from xcodon_runtime import cli, daemon
+
+    assert cli.is_shim is daemon.is_shim and cli.resolve_docker is daemon.resolve_docker

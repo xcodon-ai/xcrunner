@@ -27,7 +27,7 @@ from xcodon_runtime.buildpaths import (
 )
 from xcodon_runtime.containers import _rmtree_tolerant
 from xcodon_runtime.errors import XcodonError
-from xcodon_runtime.imagestore import Image
+from xcodon_runtime.imagestore import Image, env_to_dict
 
 if TYPE_CHECKING:
     from xcodon_runtime.api import Runtime
@@ -193,11 +193,7 @@ class Builder:
 
     def _scope(self, image: Image, args: Mapping[str, str]) -> dict[str, str]:
         """ARGs in scope plus the image's current Env, with Env winning on a name clash."""
-        scope: dict[str, str] = dict(args)
-        for item in image.config.get("config", {}).get("Env") or []:
-            k, _, v = item.partition("=")
-            scope[k] = v
-        return scope
+        return {**args, **env_to_dict(image.config.get("config", {}).get("Env"))}
 
     def _arg_value(self, raw: str, scope: Mapping[str, str]) -> str:
         return " ".join(split_words(raw, scope))
@@ -615,7 +611,7 @@ class Builder:
     def _run_step(self, image: Image, argv: list[str], args: Mapping[str, str], text: str) -> Image:
         # An ARG is only exposed as a RUN environment variable when no ENV of
         # the same name already won that name for the image: ENV always wins.
-        env_keys = {item.partition("=")[0] for item in (image.config.get("config", {}).get("Env") or [])}
+        env_keys = set(env_to_dict(image.config.get("config", {}).get("Env")))
         run_env = {k: v for k, v in args.items() if k not in env_keys}
         # pull="never": the step image is in the store, and the build holds
         # ``store`` shared, so prune cannot remove it. A missing image is a

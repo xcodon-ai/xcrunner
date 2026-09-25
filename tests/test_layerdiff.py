@@ -169,3 +169,30 @@ def test_link_tree_copy_fallback_strips_overlay_xattrs(tmp_path, monkeypatch):
     link_tree(src, dst_root)
     assert (dst_root / "f").read_text() == "x"
     assert not os.listxattr(dst_root / "f"), "overlay xattrs must not leak through the copy fallback"
+
+
+def test_whiteout_names_are_defined_once():
+    from xcodon_runtime import flatten, layerdiff
+
+    assert layerdiff.WHITEOUT_PREFIX is flatten.WHITEOUT_PREFIX
+    assert layerdiff.OPAQUE is flatten.OPAQUE
+
+
+def test_link_tree_and_copy_tree_share_one_walker(tmp_path):
+    import os
+
+    from xcodon_runtime.layerdiff import _copy_tree, link_tree
+
+    src = tmp_path / "src"
+    (src / "d").mkdir(parents=True)
+    (src / "d" / "f").write_text("f")
+    (src / "l").symlink_to("d/f")
+    os.chmod(src / "d", 0o750)
+    link_tree(src, tmp_path / "linked")
+    _copy_tree(src, tmp_path / "copied")
+    for dst in (tmp_path / "linked", tmp_path / "copied"):
+        assert (dst / "d" / "f").read_text() == "f"
+        assert os.readlink(dst / "l") == "d/f"
+        assert (os.stat(dst / "d").st_mode & 0o777) == 0o750
+    assert os.stat(tmp_path / "linked" / "d" / "f").st_ino == os.stat(src / "d" / "f").st_ino
+    assert os.stat(tmp_path / "copied" / "d" / "f").st_ino != os.stat(src / "d" / "f").st_ino
