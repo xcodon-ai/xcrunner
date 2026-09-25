@@ -209,6 +209,11 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
     cwd = Path(cwd) if cwd is not None else Path.cwd()
     environ = dict(os.environ if environ is None else environ)
     err = err if err is not None else sys.stderr
+    argv = list(argv)
+    if argv[:1] == ["run"]:
+        from xcodon_runtime.condarun import run_main
+
+        return run_main(argv[1:], home, cwd, environ, err)
     p = parse_args(argv)
     if p.version:
         print(f"conda {_micromamba_version(find_micromamba(home, environ))} (micromamba via xrunner)")
