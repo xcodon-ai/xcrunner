@@ -118,7 +118,10 @@ def parse_env(args: str, scope: Mapping[str, str] | None = None) -> dict[str, st
     words = split_words(s, scope)
     out: dict[str, str] = {}
     for word in words:
-        k, _, v = word.partition("=")
+        k, has_eq, v = word.partition("=")
+        if not has_eq:
+            # Docker rejects a bare key once the KEY=value form is in use.
+            raise XcodonError(f"ENV/LABEL word {word!r} has no '=': every word must be KEY=value")
         out[k] = v
     return out
 

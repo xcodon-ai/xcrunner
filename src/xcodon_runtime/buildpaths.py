@@ -30,7 +30,9 @@ def _expand_dollar(text: str, i: int, scope: Mapping[str, str]) -> tuple[str, in
     advances by 1 only). ``${NAME:-word}`` and ``${NAME:+word}``'s ``word`` is
     itself run through the same expansion (see ``_process_run``), joined back
     into one string -- "keep it simple: expand variables in it and strip
-    quotes," not a fully general nested grammar.
+    quotes," not a fully general nested grammar. Any other ``${...}`` form,
+    such as ``${}`` or ``${NAME junk}``, raises ``XcodonError``, like
+    docker's "bad substitution" error.
     """
     j = i + 1
     if j < len(text) and text[j] == "{":
@@ -40,7 +42,7 @@ def _expand_dollar(text: str, i: int, scope: Mapping[str, str]) -> tuple[str, in
         inner = text[j + 1 : end]
         m = _NAME_RE.match(inner)
         if not m:
-            return "$", i + 1
+            raise XcodonError(f"bad substitution '${{{inner}}}' in {text!r}")
         name = m.group(0)
         rest = inner[len(name) :]
         if rest.startswith(":-") or rest.startswith(":+"):
@@ -51,9 +53,7 @@ def _expand_dollar(text: str, i: int, scope: Mapping[str, str]) -> tuple[str, in
                 return (value if value else word), end + 1
             return (word if value else ""), end + 1
         if rest:
-            # Malformed (e.g. "${NAME junk}"): leave the '$' literal and let
-            # the rest of the text be reprocessed normally.
-            return "$", i + 1
+            raise XcodonError(f"bad substitution '${{{inner}}}' in {text!r}")
         return scope.get(name, ""), end + 1
     m = _NAME_RE.match(text, j)
     if not m:

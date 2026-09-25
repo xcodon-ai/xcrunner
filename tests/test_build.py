@@ -810,3 +810,13 @@ def test_copy_file_replaces_earlier_source_symlink_pointing_outside(rt, tmp_path
     built = rt.build(ctx)
     x = built.rootfs / "y" / "x"
     assert not x.is_symlink() and x.read_text() == "file-x"
+
+
+# -- round 4, item 3: a bare key mixed with KEY=value pairs is an error -----
+
+def test_env_bare_key_mixed_with_pairs_raises(rt, tmp_path):
+    ctx = tmp_path / "ctx-envmixed"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\nENV A=1 B\n")
+    with pytest.raises(XcodonError, match="'B'"):
+        rt.build(ctx)
