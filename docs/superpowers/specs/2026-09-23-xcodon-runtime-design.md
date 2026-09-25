@@ -671,3 +671,91 @@ mistaken for a complete one.
 
 Mounting host pixi or conda folders onto PATH, sharing one env folder across
 different images, exporting or importing an env, and pruning env folders.
+
+## 11. Building images without a daemon
+
+Added 2026-09-24. Approved design. xrunner is used where docker is absent,
+so anything the agent does with `docker build` and `docker commit` must be
+possible with xrunner alone.
+
+### 11.1 Problem
+
+The agent bakes a dependency image with `docker build` from a tiny
+Dockerfile (`FROM base`, `COPY`, `RUN pip install ...`) and reuses it by tag
+with `docker image inspect`. Without docker that path fails, and installs
+done through xrunner's env folder cannot be turned into a named image.
+Separately, when a daemon exists and rebuilds a tag, xrunner kept serving the
+old image under that tag.
+
+### 11.2 Commit
+
+`xrunner commit` turns a writable layer into a new image layer on top of its
+base image, and registers the result under a tag.
+
+- Sources: a stopped container (`xrunner commit CONTAINER TAG`) or an env
+  folder layer (`xrunner commit --env-dir DIR IMAGE TAG`). A layer that is in
+  use, a running container or a locked env layer, is refused.
+- ns engine: the overlay upper directory is translated to OCI form. A
+  character device 0:0 becomes a `.wh.<name>` marker; a directory carrying
+  the `user.overlay.opaque` or `trusted.overlay.opaque` attribute gets a
+  `.wh..wh..opq` marker; other `overlay.*` attributes are dropped; regular
+  files are hardlinked, symlinks recreated, other special files skipped.
+- proot engine: the rootfs copy is compared with the image rootfs. Entries
+  that differ in type, size, mode, mtime, or link target, or are new, go in
+  the layer; entries missing from the copy become `.wh.` markers.
+- The layer's diff id is the SHA-256 of a deterministic tar of the layer
+  directory (sorted entries, zeroed owner and mtime). The new config is the
+  base config with the diff id appended, a history entry, a new `created`
+  time, and any requested config changes (`ENV`, `CMD`, `ENTRYPOINT`,
+  `WORKDIR`, `USER`, `LABEL`). The image id is the SHA-256 of the canonical
+  config JSON, as for pulled images. The image directory is built like a
+  pulled one, with `manifest.json` `source: "commit"` and the parent id.
+- A commit with no layer changes, only config changes, appends no diff id.
+
+### 11.3 Build
+
+`xrunner build -t TAG [-f FILE] [--build-arg K=V]... [--no-cache] CONTEXT`
+runs a Dockerfile subset entirely in xrunner containers.
+
+- Instructions: `FROM`, `RUN` (shell and exec form), `COPY` and `ADD` for
+  local paths with globs (no URLs, no tar extraction), `ENV`, `WORKDIR`,
+  `USER`, `ENTRYPOINT`, `CMD`, `LABEL`, `ARG`, `SHELL`. Comments and
+  backslash continuations. `EXPOSE`, `VOLUME`, `HEALTHCHECK`, `STOPSIGNAL`,
+  `MAINTAINER`, and `ONBUILD` are accepted and ignored with a warning.
+  `FROM ... AS` and `--target` (multi-stage) are errors.
+- Each `RUN` starts a container from the current image, executes the command
+  with the image's environment plus build args, streams the output, and
+  commits the container. Each `COPY`/`ADD` builds a layer on the host and
+  commits it. Config-only instructions commit a config-only image.
+- Cache: a key of parent image id, instruction text, and for `COPY` the
+  content hash of the sources, maps to the resulting image id in
+  `<home>/build-cache.json`. A hit skips the step. `--no-cache` ignores it.
+  Intermediate images are untagged; `prune --all` removes untagged images.
+- `-t` tags the final image; several `-t` are allowed.
+
+### 11.4 Docker-compatible surface and shim
+
+- Aliases: `xrunner image inspect|ls|rm`, `xrunner tag SRC DST`.
+- `xrunner docker VERB ...` accepts docker's verbs and flags for the subset
+  the agent and cwltool use: `build`, `image inspect`, `image ls|images`,
+  `image rm|rmi`, `tag`, `pull`, `run`, `create`, `start`, `exec`, `stop`,
+  `rm`, `ps`, `logs`, `commit`, `version`, `info`. Unknown verbs exit 125
+  with a message.
+- `xrunner shim install [--dir DIR] [--force]` writes an executable named
+  `docker` into DIR (default: the directory of the running interpreter) that
+  forwards to `xrunner docker`. It refuses when a real docker is already on
+  PATH unless `--force`, and prints how to put DIR on PATH. This is how the
+  unchanged agent reaches xrunner on a host without docker.
+
+### 11.5 Stale tags from a daemon
+
+When resolving a tag with `pull="missing"`, if the stored image came from a
+local daemon (`manifest.json` source `daemon`) and the daemon is available
+and has the tag, xrunner compares the daemon's image id with the stored id
+and re-imports on mismatch. Locally built and committed images are never
+replaced by this check.
+
+### 11.6 Out of scope
+
+Multi-stage builds, `RUN --mount`, build secrets, `.dockerignore`, `ADD`
+from URLs or tar extraction, pushing or exporting images.
