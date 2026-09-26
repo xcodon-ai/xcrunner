@@ -92,12 +92,12 @@ class ContainerStore:
 
         The name-uniqueness check and the directory create (through the
         config save that makes it visible to ``list()``) happen under the
-        store-wide ``containers`` lock, so two concurrent creates for the
-        same name cannot both succeed.
+        ``containers`` lock of the container dir, so two concurrent creates
+        for the same name cannot both succeed.
         """
         from datetime import datetime, timezone
 
-        with self.home.lock("containers"):
+        with self.home.container_lock("containers"):
             if name is not None:
                 for existing in self.list():
                     if existing.name == name:

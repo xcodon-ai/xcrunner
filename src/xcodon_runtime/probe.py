@@ -1,6 +1,9 @@
 """Engine probes. Each probe runs in its own child process so a failure cannot hurt the caller.
 
-Usage as a child: python -m xcodon_runtime.probe NAME HOME_PATH
+Usage as a child: python -m xcodon_runtime.probe NAME HOME_PATH [CONTAINER_DIR]
+
+The overlay probe mounts the way a container does: the read-only side in the
+runtime home, where images live, and the writable side in the container dir.
 """
 
 from __future__ import annotations
@@ -26,28 +29,33 @@ def _enter_userns() -> None:
     sc.mount(None, "/", None, sc.MS_REC | sc.MS_PRIVATE)
 
 
-def _probe_userns(home: Path) -> None:
+def _probe_userns(home: Path, containers: Path) -> None:
     _enter_userns()
 
 
-def _probe_overlay(home: Path) -> None:
+def _probe_overlay(home: Path, containers: Path) -> None:
+    import shutil
+
     _enter_userns()
-    base = Path(tempfile.mkdtemp(prefix="probe-", dir=home))
+    ro = Path(tempfile.mkdtemp(prefix="probe-", dir=home))
     try:
-        for d in ("lower", "upper", "work", "merged"):
-            (base / d).mkdir()
-        (base / "lower" / "f").write_text("x")
-        sc.mount("overlay", str(base / "merged"), "overlay", 0,
-                 f"lowerdir={base / 'lower'},upperdir={base / 'upper'},workdir={base / 'work'}")
-        assert (base / "merged" / "f").read_text() == "x"
-        sc.umount2(str(base / "merged"), sc.MNT_DETACH)
+        rw = Path(tempfile.mkdtemp(prefix="probe-", dir=containers))
+        try:
+            (ro / "lower").mkdir()
+            for d in ("upper", "work", "merged"):
+                (rw / d).mkdir()
+            (ro / "lower" / "f").write_text("x")
+            sc.mount("overlay", str(rw / "merged"), "overlay", 0,
+                     f"lowerdir={ro / 'lower'},upperdir={rw / 'upper'},workdir={rw / 'work'}")
+            assert (rw / "merged" / "f").read_text() == "x"
+            sc.umount2(str(rw / "merged"), sc.MNT_DETACH)
+        finally:
+            shutil.rmtree(rw, ignore_errors=True)
     finally:
-        import shutil
-
-        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(ro, ignore_errors=True)
 
 
-def _probe_pidns_proc(home: Path) -> None:
+def _probe_pidns_proc(home: Path, containers: Path) -> None:
     _enter_userns()
     sc.unshare(sc.CLONE_NEWPID)
     pid = os.fork()
@@ -71,15 +79,15 @@ def _probe_pidns_proc(home: Path) -> None:
 _PROBES = {"userns": _probe_userns, "overlay": _probe_overlay, "pidns_proc": _probe_pidns_proc}
 
 
-def run_probes(home_path: Path | None = None) -> dict[str, dict]:
+def run_probes(home_path: Path | None = None, containers_path: Path | None = None) -> dict[str, dict]:
     from xcodon_runtime.home import RuntimeHome
 
-    home = RuntimeHome(home_path).path
+    home = RuntimeHome(home_path, containers=containers_path)
     results: dict[str, dict] = {}
     for name in PROBE_NAMES:
         try:
             r = subprocess.run(
-                [sys.executable, "-m", "xcodon_runtime.probe", name, str(home)],
+                [sys.executable, "-m", "xcodon_runtime.probe", name, str(home.path), str(home.containers)],
                 capture_output=True, text=True, timeout=30,
             )
             err = (r.stderr.strip().splitlines() or [""])[-1] if r.returncode else ""
@@ -91,11 +99,14 @@ def run_probes(home_path: Path | None = None) -> dict[str, dict]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 2 or argv[0] not in _PROBES:
-        print(f"usage: python -m xcodon_runtime.probe {{{'|'.join(PROBE_NAMES)}}} HOME", file=sys.stderr)
+    if len(argv) not in (2, 3) or argv[0] not in _PROBES:
+        print(f"usage: python -m xcodon_runtime.probe {{{'|'.join(PROBE_NAMES)}}} HOME [CONTAINER_DIR]",
+              file=sys.stderr)
         return 2
+    home = Path(argv[1])
+    containers = Path(argv[2]) if len(argv) == 3 else home / "containers"
     try:
-        _PROBES[argv[0]](Path(argv[1]))
+        _PROBES[argv[0]](home, containers)
     except BaseException as e:  # noqa: BLE001 — report anything, this is a probe
         print(f"{argv[0]}: {e}", file=sys.stderr)
         return 1

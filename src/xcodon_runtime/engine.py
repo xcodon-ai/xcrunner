@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from xcodon_runtime.errors import EngineUnavailable
-from xcodon_runtime.home import RuntimeHome
+from xcodon_runtime.home import CONTAINER_DIR_ENV, RuntimeHome, container_lock_in
 from xcodon_runtime.probe import PROBE_NAMES, run_probes
 
 if TYPE_CHECKING:
@@ -49,12 +49,12 @@ class Engine(Protocol):
 def container_lock(container: "Container"):
     """The lock both engines hold across start and stop of one container.
 
-    An engine is given no runtime home, so the home is derived from the
-    container directory, which is always ``<home>/containers/<id>``. Without
-    this lock two concurrent starts both see "not running" and each spawns a
-    keeper; the first one is then leaked.
+    An engine is given no runtime home, so the lock sits in the container
+    dir that holds this container, which is ``<home>/containers`` or
+    ``$XRUNNER_CONTAINER_DIR``. Without this lock two concurrent starts both
+    see "not running" and each spawns a keeper; the first one is then leaked.
     """
-    return RuntimeHome(container.dir.parent.parent).lock(f"container-{container.id}")
+    return container_lock_in(container.dir.parent, f"container-{container.id}")
 
 
 @dataclass
@@ -70,11 +70,14 @@ def select_engine(home: RuntimeHome, override: str | None = None) -> EngineChoic
         if override not in ENGINE_NAMES:
             raise EngineUnavailable(f"XCODON_ENGINE={override!r}; valid values: {', '.join(ENGINE_NAMES)}")
         return EngineChoice(override, {}, f"requested: {override}")
-    probes = run_probes(home.path)
+    probes = run_probes(home.path, home.containers)
     failed = [n for n in PROBE_NAMES if not probes[n]["ok"]]
     if not failed:
         return EngineChoice("ns", probes, "user namespaces, overlayfs, and pid namespaces all work")
     reason = "; ".join(f"{n}: {probes[n]['error'] or 'failed'}" for n in failed)
+    if failed == ["overlay"]:
+        reason += (f" (the container dir {home.containers} or the image store may be on a filesystem "
+                   f"overlayfs cannot use, such as NFS; set {CONTAINER_DIR_ENV} to a local disk)")
     log.info("ns engine unavailable (%s); using proot", reason)
     return EngineChoice("proot", probes, reason)
 

@@ -462,6 +462,7 @@ class Runtime:
         return {
             "version": __version__,
             "home": str(self.home.path),
+            "containers": str(self.home.containers),
             "engine": choice.name,
             "engine_reason": choice.reason,
             "probes": choice.probes,

@@ -176,11 +176,32 @@ image and give it the local name.
 After that, `FROM coala-runtime-python:latest` uses the stored image and
 never goes to the network. xrunner does not map image names itself.
 
+## Clusters with shared storage
+
+Overlayfs cannot write its upper layer to NFS, Lustre or GPFS. When the home is on
+shared storage, the overlay probe fails and xrunner falls back to the slower proot
+engine. Keep the image store on shared storage and put container folders on a
+node-local disk:
+
+    export XCODON_RUNTIME_HOME=/shared/$USER/xrunner
+    export XRUNNER_CONTAINER_DIR=${TMPDIR:-/tmp}/xrunner-containers
+
+Images are pulled once into the shared home and read from there. Each container's
+writable layer, its keeper log and its locks live under `XRUNNER_CONTAINER_DIR`.
+Containers are then local to one node: `xrunner ps` on another node does not list
+them. `xrunner info` shows both folders and the engine the probes chose.
+
+The setting does not move an env folder. An env folder keeps a writable layer across
+containers, so on the ns engine it must also be on a local disk. Point
+`XRUNNER_ENV_DIR` at node-local storage, or set `XCODON_ENGINE=proot` to keep it on
+shared storage.
+
 ## Environment variables
 
 | Variable | Meaning |
 |---|---|
 | `XCODON_RUNTIME_HOME` | State directory. Default `~/.xcodon/runtime`. |
+| `XRUNNER_CONTAINER_DIR` | Container folders. Default `<home>/containers`. |
 | `XCODON_ENGINE` | `ns` or `proot`. Skips probing. |
 | `XCODON_PROOT` | Path to a PRoot binary. |
 | `XCODON_PROOT_ARGS` | Extra PRoot flags, for example `-k 5.15.0`. |

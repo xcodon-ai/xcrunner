@@ -41,6 +41,7 @@ def home(tmp_path: Path, monkeypatch) -> RuntimeHome:
     """A fresh runtime home under tmp_path. Also exported via env for subprocesses."""
     root = tmp_path / "runtime-home"
     monkeypatch.setenv("XCODON_RUNTIME_HOME", str(root))
+    monkeypatch.delenv("XRUNNER_CONTAINER_DIR", raising=False)
     return RuntimeHome(root)
 
 
