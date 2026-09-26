@@ -48,6 +48,10 @@ class FetchedImage:
     # docker's containerd image store it is the manifest digest, not the
     # config digest, so it is kept as is and compared as is.
     daemon_id: str | None = None
+    # Where this image lives in a registry, as `name@sha256:<manifest digest>`:
+    # the digest of the tag's own manifest (an index for multi-arch images, as
+    # docker's RepoDigests records it). Empty when unknown.
+    repo_digests: list[str] = field(default_factory=list)
 
 
 def select_platform(manifests: list[dict], platform: Platform) -> str:
@@ -165,16 +169,22 @@ class RegistryClient:
 
     # -- public API ----------------------------------------------------------------
 
-    def _manifest(self, ref: Reference, manifest_ref: str) -> dict:
+    def _manifest_and_digest(self, ref: Reference, manifest_ref: str) -> tuple[dict, str]:
         with self._get(ref, f"manifests/{manifest_ref}", MANIFEST_ACCEPT) as r:
             body = r.read()
             media_type = r.headers.get("Content-Type", "").split(";")[0].strip()
+            digest = r.headers.get("Docker-Content-Digest") or ""
+        if not digest.startswith("sha256:"):
+            digest = "sha256:" + hashlib.sha256(body).hexdigest()
         data = json.loads(body)
         data.setdefault("mediaType", media_type)
-        return data
+        return data, digest
+
+    def _manifest(self, ref: Reference, manifest_ref: str) -> dict:
+        return self._manifest_and_digest(ref, manifest_ref)[0]
 
     def fetch(self, ref: Reference, platform: Platform) -> FetchedImage:
-        manifest = self._manifest(ref, ref.manifest_ref)
+        manifest, top_digest = self._manifest_and_digest(ref, ref.manifest_ref)
         if manifest.get("mediaType") in INDEX_TYPES or "manifests" in manifest:
             digest = select_platform(manifest["manifests"], platform)
             manifest = self._manifest(ref, digest)
@@ -186,7 +196,8 @@ class RegistryClient:
             FetchedLayer(l["digest"], l.get("mediaType", ""), int(l.get("size", 0)), self.fetch_blob(ref, l["digest"]))
             for l in manifest["layers"]
         ]
-        return FetchedImage(config_digest, config, layers, source=self.name)
+        return FetchedImage(config_digest, config, layers, source=self.name,
+                             repo_digests=[f"{ref.registry}/{ref.repository}@{top_digest}"])
 
     def fetch_blob(self, ref: Reference, digest: str) -> Path:
         """Download a blob to the home blob store, verifying its digest. Idempotent."""

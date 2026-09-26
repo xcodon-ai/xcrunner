@@ -329,6 +329,7 @@ class Builder:
                 self._cache_put(key, image.id)
 
             assert image is not None
+            self.rt.images.annotate(image.id, dockerfile=dockerfile_text)
             for t in tags:
                 image = self.rt.images.tag(image.id, t)
             self.out(f"Successfully built {image.short_id}")

@@ -17,6 +17,7 @@ from xcodon_runtime.errors import ImageNotFound, PullError, XcodonError
 from xcodon_runtime.flatten import build_rootfs
 from xcodon_runtime.home import RuntimeHome
 from xcodon_runtime.layerdiff import hash_layer_dir, link_tree
+from xcodon_runtime.pkgscan import Pkg, pkg_from_json, pkg_to_json, scan_tree
 from xcodon_runtime.reference import Platform, host_platform, parse_reference
 from xcodon_runtime.registry import FetchedImage, RegistryClient
 from xcodon_runtime.tarlayer import extract_layer, open_layer_stream
@@ -153,8 +154,10 @@ class ImageStore:
             layer_dirs = [self._ensure_layer(diff_id, layer.blob_path) for diff_id, layer in zip(diff_ids, fetched.layers)]
 
             image_dir = self.home.images / image_id
+            is_new = False
             with self.home.lock(f"image-{image_id}"):
                 if not image_dir.exists():
+                    is_new = True
                     manifest = {
                         "config": fetched.config_digest,
                         "diff_ids": diff_ids,
@@ -163,19 +166,64 @@ class ImageStore:
                     }
                     if fetched.daemon_id:
                         manifest["daemon_id"] = fetched.daemon_id
+                    if fetched.repo_digests:
+                        manifest["repo_digests"] = sorted(set(fetched.repo_digests))
                     with self.home.atomic_dir(image_dir) as tmp:
                         (tmp / "config.json").write_text(json.dumps(fetched.config, indent=2))
                         (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2))
                         log.info("flattening %d layers for %s", len(layer_dirs), image_id[:12])
                         build_rootfs(layer_dirs, tmp / "rootfs")
-                elif fetched.daemon_id:
-                    self._record_daemon_id(image_dir, fetched.daemon_id)
+                else:
+                    if fetched.daemon_id:
+                        self._record_daemon_id(image_dir, fetched.daemon_id)
             for layer in fetched.layers:
                 layer.blob_path.unlink(missing_ok=True)
             (self.home.blobs / image_id).unlink(missing_ok=True)
 
             self._set_ref(ref_name, image_id)
+            # annotate() takes the image lock itself, so it must run after the
+            # lock above is released; skip it for a brand-new image, whose
+            # manifest was just written with repo_digests already in it.
+            if not is_new and fetched.repo_digests:
+                self.annotate(image_id, repo_digests=fetched.repo_digests)
             return self._load(image_id)
+
+    def manifest(self, image: Image) -> dict:
+        try:
+            return json.loads((image.dir / "manifest.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def annotate(self, image_id: str, **fields) -> None:
+        """Merge fields into an image's manifest.json. repo_digests merge; other fields replace."""
+        image_dir = self.home.images / image_id
+        with self.home.lock(f"image-{image_id}"):
+            path = image_dir / "manifest.json"
+            manifest = json.loads(path.read_text())
+            for key, value in fields.items():
+                if key == "repo_digests":
+                    manifest[key] = sorted(set(manifest.get(key, [])) | set(value))
+                else:
+                    manifest[key] = value
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(manifest, indent=2))
+            os.replace(tmp, path)
+
+    def package_inventory(self, image: Image) -> list[Pkg]:
+        """The packages in an image's rootfs, scanned once and cached in packages.json."""
+        cache = image.dir / "packages.json"
+        try:
+            data = json.loads(cache.read_text())
+            if data.get("version") == 1:
+                return [pkg_from_json(d) for d in data["packages"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        pkgs = scan_tree(image.rootfs)
+        with self.home.lock(f"image-{image.id}"):
+            tmp = cache.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"version": 1, "packages": [pkg_to_json(p) for p in pkgs]}, indent=2))
+            os.replace(tmp, cache)
+        return pkgs
 
     def _record_daemon_id(self, image_dir: Path, daemon_id: str) -> None:
         """Store the daemon's id in an existing daemon-sourced image's manifest.

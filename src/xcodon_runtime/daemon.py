@@ -147,6 +147,24 @@ class DaemonSource:
         out = r.stdout.strip()
         return out if r.returncode == 0 and out.startswith("sha256:") else None
 
+    def repo_digests(self, ref: Reference) -> list[str]:
+        """docker's RepoDigests for a tag: registry copies of this image. Empty when none or unknown."""
+        exe = self._exe()
+        if not exe:
+            return []
+        try:
+            r = subprocess.run([exe, "image", "inspect", "--format", "{{json .RepoDigests}}", ref.name],
+                               capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if r.returncode != 0:
+            return []
+        try:
+            value = json.loads(r.stdout.strip() or "null")
+        except ValueError:
+            return []
+        return sorted({v for v in value or [] if isinstance(v, str) and "@sha256:" in v})
+
     def fetch(self, ref: Reference, platform: Platform) -> FetchedImage:
         exe = self._exe()
         if not exe:
@@ -156,6 +174,7 @@ class DaemonSource:
         # `docker save` runs, the stored id is the older one and the next
         # resolve imports the image again, which is the safe direction.
         daemon_id = self.image_id(ref)
+        repo_digests = self.repo_digests(ref)
         err = tempfile.TemporaryFile()
         try:
             proc = subprocess.Popen([exe, "save", ref.name], stdout=subprocess.PIPE, stderr=err)
@@ -179,6 +198,7 @@ class DaemonSource:
             if fetch_error is not None:
                 raise fetch_error
             fetched.daemon_id = daemon_id
+            fetched.repo_digests = repo_digests
             return fetched
         finally:
             err.close()
