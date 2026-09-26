@@ -16,11 +16,11 @@ from pathlib import Path
 from xcodon_runtime import __version__
 from xcodon_runtime.api import Runtime
 from xcodon_runtime.imagestore import env_to_dict
-from xcodon_runtime.daemon import SHIM_MARKER
 from xcodon_runtime.engine import Bind
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.keeper import KEEPER_LOG
 from xcodon_runtime.reference import parse_platform
+from xcodon_runtime.shim import DOCKER_MARKER as SHIM_MARKER
 
 log = logging.getLogger("xrunner")
 

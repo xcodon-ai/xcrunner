@@ -232,9 +232,11 @@ def test_daemon_source_fetch_reports_the_reader_error_when_docker_is_silent(home
 
 
 def test_shim_helpers_are_public():
-    """daemon.is_shim/resolve_docker are shim.py's is_xrunner_shim/resolve_real, kept
-    public here under their original names (daemon.py itself uses them; cli.py still
-    imports SHIM_MARKER from daemon), not a re-implementation of the same behavior."""
-    from xcodon_runtime import daemon, shim
+    """daemon.resolve_docker is shim.py's resolve_real, kept public here under its
+    original name, not a re-implementation of the same behavior. The unused
+    is_shim and SHIM_MARKER aliases are gone; cli.py takes the marker from shim.py."""
+    from xcodon_runtime import cli, daemon, shim
 
-    assert daemon.is_shim is shim.is_xrunner_shim and daemon.resolve_docker is shim.resolve_real
+    assert daemon.resolve_docker is shim.resolve_real
+    assert not hasattr(daemon, "is_shim") and not hasattr(daemon, "SHIM_MARKER")
+    assert cli.SHIM_MARKER is shim.DOCKER_MARKER

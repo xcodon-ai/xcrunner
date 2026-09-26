@@ -15,14 +15,13 @@ from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
 
 from xcodon_runtime.api import Runtime
+from xcodon_runtime.condaroot import ENV_DIR_VAR
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import Bind
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.keeper import KEEPER_LOG
 
 log = logging.getLogger(__name__)
-
-ENV_DIR_VAR = "XRUNNER_ENV_DIR"
 
 
 async def _call(fn, *args, **kwargs):

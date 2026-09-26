@@ -15,17 +15,13 @@ from xcodon_runtime.errors import PullError
 from xcodon_runtime.home import RuntimeHome
 from xcodon_runtime.reference import Platform, Reference
 from xcodon_runtime.registry import INDEX_TYPES, FetchedImage, FetchedLayer, select_platform
-from xcodon_runtime.shim import DOCKER_MARKER, is_xrunner_shim, resolve_real
+from xcodon_runtime.shim import resolve_real
 
 log = logging.getLogger(__name__)
 CHUNK = 1 << 20
 
-# The docker shim marker, and the helpers that recognize/resolve it, live in
-# shim.py now (shared with the conda shim `xrunner shim install` also writes).
-# Kept public here under their original names: daemon.py uses them below, and
-# cli.py still imports `SHIM_MARKER` from this module.
-SHIM_MARKER = DOCKER_MARKER
-is_shim = is_xrunner_shim
+# Finding a real docker, skipping xrunner's own shims, lives in shim.py (shared
+# with the conda shim). Kept public here under its original name.
 resolve_docker = resolve_real
 
 
