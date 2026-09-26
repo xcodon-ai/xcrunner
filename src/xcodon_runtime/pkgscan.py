@@ -214,21 +214,24 @@ def scan_tree(root: Path) -> list[Pkg]:
     return sorted(found.values(), key=lambda p: p.key)
 
 
-def _drop_under(merged: dict, cprefix: str) -> None:
+def _drop_under(merged: dict, cprefix: str, from_upper: set | None = None) -> None:
     prefix = cprefix.rstrip("/") + "/"
     for key, pkg in list(merged.items()):
         if pkg.path == cprefix or pkg.path.startswith(prefix):
             del merged[key]
+            if from_upper is not None:
+                from_upper.discard(key)
 
 
 def ns_layer_packages(upper: Path, base: list[Pkg]) -> list[Pkg]:
     """The packages visible through an overlay: ``base`` with the upper's changes applied."""
     merged = {p.key: p for p in base}
+    from_upper: set = set()
     for dirpath, dirnames, filenames in os.walk(upper, topdown=True, followlinks=False):
         rel = os.path.relpath(dirpath, upper)
         rel_dir = "/" if rel == "." else "/" + rel
         if rel_dir != "/" and is_opaque(Path(dirpath)):
-            _drop_under(merged, rel_dir)
+            _drop_under(merged, rel_dir, from_upper)
         dirnames[:] = [d for d in dirnames if not d.startswith("00LOCK")]
         dirnames.sort()
         for name in list(dirnames) + sorted(filenames):
@@ -239,7 +242,7 @@ def ns_layer_packages(upper: Path, base: list[Pkg]) -> list[Pkg]:
             except OSError:
                 continue
             if is_whiteout(host, st):
-                _drop_under(merged, cpath)
+                _drop_under(merged, cpath, from_upper)
                 if name in dirnames:
                     dirnames.remove(name)
                 continue
@@ -253,9 +256,12 @@ def ns_layer_packages(upper: Path, base: list[Pkg]) -> list[Pkg]:
                 if name in dirnames:
                     dirnames.remove(name)
                 continue
-            _drop_under(merged, cpath)
+            _drop_under(merged, cpath, from_upper)
             for pkg in pkgs:
-                if pkg.key not in merged or _natural_sort_key(pkg.version) > _natural_sort_key(merged[pkg.key].version):
+                if pkg.key not in from_upper:
+                    merged[pkg.key] = pkg
+                    from_upper.add(pkg.key)
+                elif _natural_sort_key(pkg.version) > _natural_sort_key(merged[pkg.key].version):
                     merged[pkg.key] = pkg
             if is_dir:
                 dirnames.remove(name)

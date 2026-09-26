@@ -1108,17 +1108,19 @@ For the proot engine it is the rootfs copy compared with the image rootfs.
 - conda inside the image: `conda-meta/*.json` files; `name`, `version` and
   `url` from the JSON.
 
-When multiple versions of one package exist in one location (a full scan or
-overlay merge), the highest version by natural sort is kept.
+In a full scan, when multiple versions of one package exist in one location,
+the highest version by natural sort is kept. In a layer, an entry from the layer
+always replaces the base entry, and the higher version wins only among entries
+found in the layer itself.
 
 A package whose metadata directory is new in the layer is `added`. One that
 exists in both with a different version is `changed`. One whose metadata is
 removed by a whiteout, an opaque parent, or its absence from the proot copy
 is `removed`. When an overlay upper holds a partially copied-up metadata folder
 where the metadata file is missing or unreadable and the upper directory is not
-opaque, the base entry is kept; this represents in-place package modifications
-that do not replace the package. A metadata file that cannot be parsed is
-skipped with a debug log, never an error.
+opaque, the base entry is kept and the folder is not read further; this represents
+in-place package modifications that do not replace the package. A metadata file
+that cannot be parsed is skipped with a debug log, never an error.
 
 ### 13.4 When the record is written
 

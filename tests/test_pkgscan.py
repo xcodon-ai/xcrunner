@@ -267,3 +267,32 @@ def test_ns_layer_packages_keeps_highest_version(tmp_path):
     got = ns_layer_packages(upper, [])
     versions = {p.version for p in got if p.name == "foo"}
     assert versions == {"1.10.0"}, f"Expected foo 1.10.0, got {versions}"
+
+
+def test_ns_downgrade_with_whiteout(tmp_path, monkeypatch):
+    """Test that a downgrade via whiteout is marked as changed, not removed."""
+    base_root = tmp_path / "base"
+    pip_pkg(base_root, "foo", "1.0")
+    base = scan_tree(base_root)
+
+    upper = tmp_path / "upper"
+    pip_pkg(upper, "foo", "0.9")
+    put(upper, f"{SP}/foo-1.0.dist-info", "")
+    monkeypatch.setattr(pkgscan, "is_whiteout",
+                        lambda p, st: stat.S_ISREG(st.st_mode) and st.st_size == 0 and p.name.endswith(".dist-info"))
+
+    got = {(c["name"], c["version"], c["change"]) for c in changes(base, ns_layer_packages(upper, base))}
+    assert got == {("foo", "0.9", "changed")}, f"Expected foo 0.9 changed, got {got}"
+
+
+def test_ns_upper_entry_replaces_base(tmp_path):
+    """Test that an upper entry always replaces the base entry, even if lower version."""
+    base_root = tmp_path / "base"
+    pip_pkg(base_root, "foo", "1.0")
+    base = scan_tree(base_root)
+
+    upper = tmp_path / "upper"
+    pip_pkg(upper, "foo", "0.9")
+
+    got = {(c["name"], c["version"], c["change"]) for c in changes(base, ns_layer_packages(upper, base))}
+    assert got == {("foo", "0.9", "changed")}, f"Expected foo 0.9 changed, got {got}"
