@@ -138,10 +138,19 @@ xrunner keeps `.xrunner-env/environment.json`, a per-project record of the image
 project used (id, source, registry digests, and any build Dockerfile) and the
 packages each install added, changed or removed.
 
+For each image it also keeps the platform, package counts, and for built images
+the packages the build added. `.xrunner-env/packages/<image id>.json` holds the full
+package list of each image the project used, not only the changes.
+
 The record updates automatically after conda changes and when containers stop.
-`xrunner env show` prints it, and `xrunner env record` rebuilds it from what is on
-disk. It is a record, not a restore mechanism: it does not recreate images or
-packages, only describes what happened.
+`xrunner env show` prints it, `xrunner env show --json` prints the file, and
+`xrunner env record` rebuilds it from what is on disk. Images keep their entries as
+history; `env record` never removes one.
+
+It is a record, not a restore mechanism: it does not recreate images or packages,
+only describes what happened. Images built before this feature have no Dockerfile
+on record. On the proot engine each container stop rescans the rootfs copy, which
+takes about 3-4 s on large images.
 
 ## Hosts without docker
 

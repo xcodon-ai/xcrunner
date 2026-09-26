@@ -1049,7 +1049,8 @@ one.
 directory (or `XRUNNER_ENV_DIR`). "Project root" below means the env
 folder's parent. Paths inside the file are relative to the project root,
 except image names and URLs. The file is JSON with sorted keys and two-space
-indent, and carries `"version": 1`. It has three sections.
+indent, and carries `"version": 1` and `"xrunner"`, the version of the
+xrunner that last wrote it. It has three sections.
 
 `images`: an object keyed by the image ref as the caller wrote it, for
 example `coala-runtime-python:latest`. Each value holds:
@@ -1063,11 +1064,35 @@ example `coala-runtime-python:latest`. Each value holds:
   empty when nothing is known. Docker's containerd image store may list a
   `RepoDigests` entry even for an image built locally, and that entry is not
   guaranteed to exist in any registry.
+- `platform`: `<os>/<architecture>`, plus `/<variant>` when the image
+  config has one, for example `linux/amd64`.
+- `daemon_id`: for a daemon import, docker's own id for the image, when
+  known.
 - `dockerfile` and `parent`: for `build` images, the Dockerfile text and the
-  parent image id. `commit` images have `parent` only.
+  parent image id. `commit` images have `parent` only. `parent` is the image
+  of the previous build step.
+- `base`: the image the build started from (its `FROM`), when that differs
+  from `parent`, as in a Dockerfile with more than one step.
+- `packages`: for `build` and `commit` images whose base is still in the
+  store, the packages the build added, changed or removed compared with
+  its base, in the `layers` format below. The base is the `base` that
+  `xrunner build` stores in the final image's manifest. For an image built
+  before that field existed, xrunner follows `parent` through the build's
+  step images (`commit` images with no Dockerfile) to the first image that
+  is not one.
+- `package_counts`: the number of packages per manager in the image, for
+  example `{"apt": 141, "pip": 33}`.
+- `packages_file`: `.xrunner-env/packages/<hex>.json`, the image's full
+  package list (see below).
 - `first_used`, `last_used`: UTC times, second precision.
 - `previous_ids`: ids this ref pointed to earlier, oldest first. When a
   recorded ref resolves to a new id, the old `id` moves here.
+
+`packages/<hex>.json` in the env folder holds one image's full package list:
+`{"version": 1, "image": "sha256:...", "packages": [...]}`. Each package is
+`{"manager", "name", "version", "location"}` plus `"url"` when known, sorted
+by manager, location and name. The same image always gives the same bytes.
+The file is written atomically, whenever it is missing or differs.
 
 `layers`: an object keyed by image id, one entry per `.xrunner-env/<id>`
 folder. Each value holds `ref` (from the folder's `image.json`), `engine`,
@@ -1129,17 +1154,38 @@ that cannot be parsed is skipped with a debug log, never an error.
 - After a successful conda command that changes an env (the RECORD verbs of
   12.6), for that env's entry.
 - When a container that uses an env folder stops, through `Runtime.stop`,
-  for that container's image and layer entries. `run --rm` stops before it
-  removes, so it records too.
-- When a container is created with an env folder, for the image entry
-  (`id`, `source`, `repo_digests`, times).
-- On demand: `xrunner env record [--env-dir DIR]` rebuilds every section
-  from what is on disk. `DIR` defaults to the env folder found as in 12.3.
+  for that container's layer entry. `run --rm` stops before it removes, so
+  it records too.
+- When a container is created with an env folder, for the image entry and
+  its `packages/<hex>.json`.
+- On demand: `xrunner env record [--env-dir DIR]` rebuilds `layers` and
+  `conda` from what is on disk and refreshes `images`. `DIR` defaults to the
+  env folder found as in 12.3. The `images` section is history: `env record`
+  never removes an entry. A ref keeps its recorded id while that image is in
+  the store, even when its layer folder does not exist yet (a container that
+  was created but never started). A ref moves to its newest layer folder
+  only when the record has no entry for it or the recorded image is gone
+  from the store. The scans run without the lock; one locked update then
+  writes the result. In that update the layer folders are listed again, a
+  `layers` entry is dropped only when its folder is gone at that moment, and
+  entries written meanwhile by a concurrent create or stop are kept.
 
 Updates hold an exclusive flock on `<env folder>/.environment.lock` while
 they read, merge and write, and write through a temporary file plus
 `os.replace`. A failure to record logs a warning and never changes the exit
-code of the command that triggered it.
+code of the command that triggered it. `env record` and `env show` report
+a file system error as an xrunner error (exit 125).
+
+Every file the record reads can come from inside a container: package
+metadata in a layer, and the conda files and the record itself in an env
+folder the container may have mounted. Each is opened with `O_NOFOLLOW`
+and `O_NONBLOCK`, read only when `fstat` shows a regular file, and capped:
+1 MiB for package metadata, 256 MiB for the dpkg status file, and 64 MiB
+for `conda-explicit.txt` and `environment.json`. A symlink, FIFO or device
+at a metadata path is skipped, never followed or waited on. Existence
+checks inside a metadata folder (`DESCRIPTION`, `Meta/package.rds`,
+`direct_url.json`) use `lstat`. JSON that does not parse, nests too deep, or
+is not an object is skipped.
 
 ### 13.5 Image metadata the store keeps
 
@@ -1151,10 +1197,12 @@ code of the command that triggered it.
   names there (for example `busybox@sha256:...`), while xrunner's own
   registry pulls record full names (`docker.io/library/busybox@sha256:...`).
 - `xrunner build` stores the Dockerfile text in the final image's
-  `manifest.json` as `dockerfile`.
+  `manifest.json` as `dockerfile`, and the `FROM` image's id as `base`.
+- A registry pull's manifest digest is the sha256 of the manifest bytes it
+  received. The `Docker-Content-Digest` response header is not trusted.
 
 Images stored before this change lack these fields; their record entries
-have an empty `repo_digests` list.
+have an empty `repo_digests` list and no `dockerfile`.
 
 ### 13.6 Tag moves
 
@@ -1169,9 +1217,12 @@ image and a new layer.
 
 - `xrunner env record [--env-dir DIR]`: rebuild the record; print its path.
 - `xrunner env show [--env-dir DIR] [--json]`: print a readable summary:
-  each image with its id, source and first repo digest; each layer's added,
-  changed and removed packages grouped by manager; each conda env with its
-  package count and explicit file. `--json` prints the file itself.
+  each image with its id, source, first repo digest, platform, package
+  counts, whether a Dockerfile is on record, its parent's short id, and the
+  packages its build added; each layer's added, changed and removed
+  packages; each conda env with its package count and explicit file.
+  `--json` prints the file's exact bytes, or the empty record when there is
+  no file.
 - Python: `xcodon_runtime.envrecord.record_all(env_dir, store) -> Path` and
   `load(env_dir) -> dict`.
 
@@ -1192,3 +1243,8 @@ in the record.
 Restoring an environment, exporting images or layers, pinning a ref to an
 id, recording files that no package manager owns, and packages installed
 outside the metadata locations above.
+
+Known cost: on the proot engine each stop rescans the whole rootfs copy,
+since there is no upper directory to read. That takes about 3-4 s on large
+images (1.3 s on the da-10-1 Python image with a warm disk cache). The image
+inventory itself is scanned once and cached.
