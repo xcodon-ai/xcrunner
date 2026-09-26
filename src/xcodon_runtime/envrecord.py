@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import stat
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -15,9 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
 
+from xcodon_runtime import __version__
 from xcodon_runtime.envdir import ENV_INFO_NAME
 from xcodon_runtime.errors import XcodonError
-from xcodon_runtime.pkgscan import changes, ns_layer_packages, scan_tree
+from xcodon_runtime.pkgscan import Pkg, changes, ns_layer_packages, read_bytes, scan_tree
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +28,38 @@ LOCK_NAME = ".environment.lock"
 VERSION = 1
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCES = {"registry": "registry", "daemon": "daemon", "commit": "build"}
+PACKAGES_DIR = "packages"
+# Read caps. Files in the env folder can be changed from inside a container
+# that has the project mounted, so every read here is capped and refuses
+# symlinks, FIFOs and devices (see pkgscan.read_bytes).
+_MAX_SMALL = 1 << 20
+_MAX_EXPLICIT = 64 << 20
+MAX_RECORD = 64 << 20
+
+
+def _json_dict(data: bytes | None) -> dict | None:
+    if data is None:
+        return None
+    try:
+        d = json.loads(data.decode("utf-8", errors="replace"))
+    except (ValueError, RecursionError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _atomic_write(path: Path, data: bytes, prefix: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=prefix, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def empty() -> dict:
@@ -39,10 +73,19 @@ def _now() -> str:
 def _read_doc(path: Path) -> dict | None:
     """The raw stored document, unknown keys included, or None if absent/unreadable."""
     try:
-        doc = json.loads(path.read_text())
+        st = os.lstat(path)
     except FileNotFoundError:
         return None
-    except (OSError, ValueError) as e:
+    except OSError as e:
+        log.warning("ignoring unreadable environment record %s: %s", path, e)
+        return None
+    data = read_bytes(path, MAX_RECORD) if stat.S_ISREG(st.st_mode) else None
+    if data is None:
+        log.warning("ignoring environment record %s: not a readable regular file", path)
+        return None
+    try:
+        doc = json.loads(data.decode("utf-8", errors="replace"))
+    except (ValueError, RecursionError) as e:
         log.warning("ignoring unreadable environment record %s: %s", path, e)
         return None
     return doc if isinstance(doc, dict) else None
@@ -89,37 +132,109 @@ def update(env_dir: Path, fn: Callable[[dict], None]) -> Path:
                 doc[key] = {}
         fn(doc)
         doc["version"] = VERSION
-        fd, tmp = tempfile.mkstemp(dir=env_dir, prefix=".environment-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(json.dumps(doc, indent=2, sort_keys=True) + "\n")
-            os.chmod(tmp, 0o644)
-            os.replace(tmp, path)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        doc["xrunner"] = __version__
+        _atomic_write(path, (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode(), ".environment-")
     return path
 
 
-def image_entry(store, image) -> dict:
+def _hex(image_id) -> str | None:
+    return image_id.split(":", 1)[-1] if isinstance(image_id, str) and image_id else None
+
+
+def _platform(config: dict) -> str | None:
+    if not isinstance(config, dict) or not config.get("os") or not config.get("architecture"):
+        return None
+    out = f"{config['os']}/{config['architecture']}"
+    return out + f"/{config['variant']}" if config.get("variant") else out
+
+
+def packages_doc(image, pkgs: list[Pkg]) -> bytes:
+    """The content of ``packages/<hex>.json``: the image's full package list, sorted, one image one content."""
+    items = []
+    for p in sorted(pkgs, key=lambda p: p.key):
+        e = {"manager": p.manager, "name": p.name, "version": p.version, "location": p.location}
+        if p.url:
+            e["url"] = p.url
+        items.append(e)
+    doc = {"version": 1, "image": "sha256:" + image.id, "packages": items}
+    return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode()
+
+
+def write_packages_file(env_dir: Path, image, pkgs: list[Pkg]) -> str:
+    """Write ``<env folder>/packages/<hex>.json`` when it is missing or differs; return its project-relative path."""
+    env_dir = Path(env_dir)
+    path = env_dir / PACKAGES_DIR / f"{image.id}.json"
+    data = packages_doc(image, pkgs)
+    if read_bytes(path, len(data) + 1) != data:
+        path.parent.mkdir(exist_ok=True)
+        _atomic_write(path, data, ".packages-")
+    return f"{env_dir.name}/{PACKAGES_DIR}/{image.id}.json"
+
+
+def build_base(store, image, manifest: dict | None = None):
+    """The image a ``build``/``commit`` image was made from, or None when it is not in the store.
+
+    A build writes one image per step, each with the previous step as its
+    ``parent``, and records the FROM image as ``base`` on the final one. For
+    images without ``base`` (built before it was recorded), follow ``parent``
+    through the intermediate step images (``commit`` images with no
+    Dockerfile) to the first image that is not one.
+    """
+    m = manifest if manifest is not None else store.manifest(image)
+    if m.get("source") != "commit" or not _hex(m.get("parent")):
+        return None
+    if _hex(m.get("base")):
+        base = store.get(_hex(m["base"]))
+        if base is not None:
+            return base
+    seen = {image.id}
+    cur = store.get(_hex(m["parent"]))
+    while cur is not None and cur.id not in seen:
+        seen.add(cur.id)
+        cm = store.manifest(cur)
+        up = _hex(cm.get("parent"))
+        if cm.get("source") != "commit" or cm.get("dockerfile") or not up:
+            return cur
+        nxt = store.get(up)
+        if nxt is None:
+            return cur
+        cur = nxt
+    return cur
+
+
+def image_entry(store, image, env_dir: Path | None = None) -> dict:
+    """The ``images`` value for one image. With ``env_dir``, also writes its ``packages/<hex>.json``."""
     m = store.manifest(image)
     source = m.get("source") or "unknown"
     e = {"id": "sha256:" + image.id, "source": _SOURCES.get(source, source),
-         "repo_digests": sorted(set(m.get("repo_digests", [])))}
+         "repo_digests": sorted({d for d in m.get("repo_digests", []) if isinstance(d, str)})}
+    platform = _platform(image.config)
+    if platform:
+        e["platform"] = platform
+    if isinstance(m.get("daemon_id"), str) and m["daemon_id"]:
+        e["daemon_id"] = m["daemon_id"]
     if m.get("dockerfile"):
         e["dockerfile"] = m["dockerfile"]
-    if m.get("parent"):
-        parent = m["parent"]
-        e["parent"] = parent if parent.startswith("sha256:") else "sha256:" + parent
+    if _hex(m.get("parent")):
+        e["parent"] = "sha256:" + _hex(m["parent"])
+    pkgs = store.package_inventory(image)
+    counts: dict[str, int] = {}
+    for p in pkgs:
+        counts[p.manager] = counts.get(p.manager, 0) + 1
+    e["package_counts"] = dict(sorted(counts.items()))
+    if env_dir is not None:
+        e["packages_file"] = write_packages_file(env_dir, image, pkgs)
+    base = build_base(store, image, m)
+    if base is not None:
+        e["packages"] = changes(store.package_inventory(base), pkgs)
+        if e.get("parent") != "sha256:" + base.id:
+            e["base"] = "sha256:" + base.id
     return e
 
 
 def note_image(env_dir: Path, ref: str, image, store, err: TextIO | None = None) -> None:
     env_dir = Path(env_dir)
-    new = image_entry(store, image)
+    new = image_entry(store, image, env_dir)
     now = _now()
 
     def fn(doc: dict) -> None:
@@ -148,44 +263,49 @@ def note_image(env_dir: Path, ref: str, image, store, err: TextIO | None = None)
 
 
 def _layer_info(layer: Path) -> dict:
-    try:
-        return json.loads((layer / ENV_INFO_NAME).read_text())
-    except (OSError, ValueError):
-        return {}
+    return _json_dict(read_bytes(layer / ENV_INFO_NAME, _MAX_SMALL)) or {}
 
 
-def record_layer(env_dir: Path, image_id: str, store) -> None:
-    env_dir = Path(env_dir)
-    layer = env_dir / image_id
+def _layer_entry(env_dir: Path, image_id: str, store) -> tuple[str, dict | None]:
+    """What the ``layers`` entry for one folder should become: ("set", entry), ("drop", None) or ("keep", None)."""
+    layer = Path(env_dir) / image_id
     has_upper = (layer / "upper").is_dir()
     has_rootfs = (layer / "rootfs").is_dir()
     if not has_upper and not has_rootfs:
         # No writable layer left for this folder (or it never had one): drop
         # any stale entry rather than keep describing packages that no
         # longer have a layer behind them.
-        update(env_dir, lambda doc: doc["layers"].pop(image_id, None))
-        return
+        return "drop", None
     info = _layer_info(layer)
     image = store.get(image_id)
     if image is None:
         log.warning("image %s of env layer %s is not in the image store; skipping its packages",
                     image_id[:12], layer)
-        return
+        return "keep", None
     base = store.package_inventory(image)
     if has_upper:
         merged, engine = ns_layer_packages(layer / "upper", base), "ns"
     else:
         merged, engine = scan_tree(layer / "rootfs"), "proot"
-    entry = {"ref": info.get("image_ref"), "engine": info.get("engine") or engine,
-             "packages": changes(base, merged)}
-    update(env_dir, lambda doc: doc["layers"].__setitem__(image_id, entry))
+    ref = info.get("image_ref")
+    return "set", {"ref": ref if isinstance(ref, str) else None,
+                   "engine": info.get("engine") if isinstance(info.get("engine"), str) else engine,
+                   "packages": changes(base, merged)}
+
+
+def record_layer(env_dir: Path, image_id: str, store) -> None:
+    env_dir = Path(env_dir)
+    action, entry = _layer_entry(env_dir, image_id, store)
+    if action == "drop":
+        update(env_dir, lambda doc: doc["layers"].pop(image_id, None))
+    elif action == "set":
+        update(env_dir, lambda doc: doc["layers"].__setitem__(image_id, entry))
 
 
 def _explicit_entry(prefix: Path, project: Path) -> dict | None:
     f = prefix / "conda-explicit.txt"
-    try:
-        data = f.read_bytes()
-    except OSError:
+    data = read_bytes(f, _MAX_EXPLICIT)
+    if data is None:
         return None
     lines = data.decode("utf-8", errors="replace").splitlines()
     return {"explicit": os.path.relpath(f, project), "sha256": hashlib.sha256(data).hexdigest(),
@@ -200,7 +320,7 @@ def _inside(path: Path, parent: Path) -> bool:
         return False
 
 
-def record_conda(env_dir: Path) -> None:
+def _conda_entries(env_dir: Path) -> dict[str, dict]:
     # Resolved up front: the project may be reached through a symlink (e.g. a
     # symlinked project directory), and an unresolved mix of real and
     # symlinked paths would otherwise produce a "path:" key full of "..".
@@ -217,12 +337,9 @@ def record_conda(env_dir: Path) -> None:
             e = _explicit_entry(d, project) if d.is_dir() else None
             if e:
                 entries[f"name:{d.name}"] = e
-    registry = root / ".home" / ".conda" / "environments.txt"
-    try:
-        listed = [Path(line.strip()) for line in registry.read_text().splitlines()
-                  if line.strip() and Path(line.strip()).is_absolute()]
-    except OSError:
-        listed = []
+    registry = read_bytes(root / ".home" / ".conda" / "environments.txt", _MAX_SMALL)
+    listed = [Path(line.strip()) for line in (registry or b"").decode("utf-8", errors="replace").splitlines()
+              if line.strip() and Path(line.strip()).is_absolute()]
     for prefix in listed:
         if not _inside(prefix, project) or _inside(prefix, root):
             continue
@@ -230,90 +347,141 @@ def record_conda(env_dir: Path) -> None:
         e = _explicit_entry(prefix, project)
         if e:
             entries[f"path:{os.path.relpath(prefix, project)}"] = e
+    return entries
+
+
+def record_conda(env_dir: Path) -> None:
+    entries = _conda_entries(env_dir)
     update(env_dir, lambda doc: doc.__setitem__("conda", entries))
 
 
-def record_all(env_dir: Path, store) -> Path:
-    """Rebuild every section from what is on disk right now.
+def _layer_folders(env_dir: Path) -> list[Path]:
+    if not env_dir.is_dir():
+        return []
+    return sorted(d for d in env_dir.iterdir() if _HEX64.match(d.name) and d.is_dir() and not d.is_symlink())
 
-    A layer folder that no longer exists loses its ``layers`` entry, and any
-    ``images`` ref left with no surviving folder for its current id or any
-    previous id is dropped entirely.
+
+def _after_scan() -> None:
+    """Called between record_all's scan and its write. A test hook; does nothing."""
+
+
+def _merge_ref(doc: dict, ref: str, items: list[tuple[str, str]], entries: dict, now: str) -> None:
+    """Refresh one ``images`` entry in ``doc``. Never removes it: the images section is history.
+
+    ``items`` are (first_used, hex) of this ref's layer folders, oldest
+    first; ``entries`` maps hex to the fresh image entry (None when that image
+    is not in the store). The record's current id stays current whenever its
+    image is in the store. Only a ref with no entry yet, or whose recorded
+    image is gone, moves to its newest folder whose image is in the store.
+    """
+    cur = doc["images"].get(ref)
+    cur = cur if isinstance(cur, dict) else {}
+    cur_id = cur.get("id") if isinstance(cur.get("id"), str) else None
+    cur_hex = _hex(cur_id)
+    candidates = [hexid for _, hexid in items]
+    prev = [p for p in cur.get("previous_ids", []) if isinstance(p, str)] \
+        if isinstance(cur.get("previous_ids"), list) else []
+    if cur_hex and cur_hex not in entries:
+        return  # written after the scan (a concurrent create): leave it as it is
+    if cur_hex and entries[cur_hex] is not None:
+        current, keep = cur_hex, True
+    else:
+        current = next((h for h in reversed(candidates) if entries.get(h) is not None), None)
+        keep = False
+        if current is None:
+            return  # nothing usable in the store for this ref; keep the entry as history
+    entry = dict(entries[current])
+    for hexid in candidates:
+        sid = "sha256:" + hexid
+        if hexid != current and sid not in prev:
+            prev.append(sid)
+    if not keep and cur_id and cur_id not in prev:
+        prev.append(cur_id)
+    entry["previous_ids"] = [p for p in prev if p != entry["id"]]
+    if keep:
+        entry["first_used"] = cur.get("first_used") or now
+        entry["last_used"] = cur.get("last_used") or entry["first_used"]
+    else:
+        # A ref that switches ids starts a fresh last_used from the new
+        # entry's first_used, never the old id's last_used.
+        entry["first_used"] = next((fu for fu, hx in items if hx == current and fu), "") or now
+        entry["last_used"] = entry["first_used"]
+    doc["images"][ref] = entry
+
+
+def record_all(env_dir: Path, store) -> Path:
+    """Rebuild ``layers`` and ``conda`` from what is on disk, and refresh ``images``.
+
+    The scans run outside the lock; one locked update then writes the
+    result. ``images`` entries are history and are never removed. A
+    ``layers`` entry is dropped only when its folder is gone at write time,
+    so a folder created during the scan keeps whatever entry it got.
     """
     env_dir = Path(env_dir)
-    layers = sorted(d for d in env_dir.iterdir() if d.is_dir() and _HEX64.match(d.name)) if env_dir.is_dir() else []
-    present_ids = {d.name for d in layers}
-
-    # Drop layer entries whose folder is gone before re-deriving the rest,
-    # so a stale entry cannot survive a rebuild by sheer absence of change.
-    update(env_dir, lambda doc: [doc["layers"].pop(k, None) for k in list(doc["layers"]) if k not in present_ids])
-
+    folders = _layer_folders(env_dir)
+    recorded = load(env_dir)["images"]
     by_ref: dict[str, list[tuple[str, str]]] = {}
-    for d in layers:
+    for d in folders:
         info = _layer_info(d)
-        if info.get("image_ref"):
-            by_ref.setdefault(info["image_ref"], []).append((info.get("first_used", ""), d.name))
-
-    for ref, items in sorted(by_ref.items()):
+        ref = info.get("image_ref")
+        if isinstance(ref, str) and ref:
+            first = info.get("first_used")
+            by_ref.setdefault(ref, []).append((first if isinstance(first, str) else "", d.name))
+    for items in by_ref.values():
         items.sort()
-        candidates = [hexid for _, hexid in items]
 
-        def fn(doc: dict, ref=ref, items=items, candidates=candidates) -> None:
-            cur = doc["images"].get(ref)
-            cur = cur if isinstance(cur, dict) else {}
-            cur_hex = cur["id"].split(":", 1)[-1] if cur.get("id") else None
-            keep_current = bool(cur_hex) and cur_hex in present_ids and cur_hex in candidates
-            image = store.get(cur_hex) if keep_current else None
-            keep_current = keep_current and image is not None
-            current_hex = cur_hex if keep_current else None
-            if not keep_current:
-                # The recorded id has no folder left (or none was recorded
-                # yet): fall back to the newest folder whose image is still
-                # in the store, skipping any newer one that is not.
-                for _, hexid in reversed(items):
-                    candidate_image = store.get(hexid)
-                    if candidate_image is not None:
-                        image, current_hex = candidate_image, hexid
-                        break
-            if image is None:
-                return  # nothing usable in the store for this ref; leave it alone
-            entry = image_entry(store, image)
-            prev = list(cur.get("previous_ids", [])) if isinstance(cur.get("previous_ids"), list) else []
-            for hexid in candidates:
-                sid = "sha256:" + hexid
-                if hexid != current_hex and sid not in prev:
-                    prev.append(sid)
-            if not keep_current and cur.get("id") and cur["id"] not in prev:
-                prev.append(cur["id"])
-            entry["previous_ids"] = [p for p in prev if p != entry["id"]]
-            if keep_current:
-                entry["first_used"] = cur.get("first_used") or _now()
-                entry["last_used"] = cur.get("last_used") or entry["first_used"]
-            else:
-                first = next((fu for fu, hx in items if hx == current_hex), "")
-                entry["first_used"] = first or _now()
-                # A ref that switches ids starts a fresh last_used from the
-                # new entry's first_used, never the old id's last_used.
-                entry["last_used"] = entry["first_used"]
-            doc["images"][ref] = entry
+    entries: dict[str, dict | None] = {}
 
-        update(env_dir, fn)
+    def entry_for(hexid: str) -> dict | None:
+        if hexid not in entries:
+            image = store.get(hexid)
+            entries[hexid] = image_entry(store, image, env_dir) if image is not None else None
+        return entries[hexid]
 
-    def _drop_orphaned_refs(doc: dict) -> None:
-        for ref, e in list(doc["images"].items()):
-            if not isinstance(e, dict):
+    refs = sorted(set(by_ref) | {r for r, e in recorded.items() if isinstance(e, dict)})
+    for ref in refs:
+        cur = recorded.get(ref)
+        cur_hex = _hex(cur.get("id")) if isinstance(cur, dict) else None
+        if cur_hex and entry_for(cur_hex) is not None:
+            continue
+        for _, hexid in reversed(by_ref.get(ref, [])):
+            if entry_for(hexid) is not None:
+                break
+    layer_entries = {d.name: _layer_entry(env_dir, d.name, store) for d in folders}
+    conda = _conda_entries(env_dir)
+    _after_scan()
+    now = _now()
+
+    def fn(doc: dict) -> None:
+        present = {d.name for d in _layer_folders(env_dir)}
+        for hexid in list(doc["layers"]):
+            if hexid not in present:
+                del doc["layers"][hexid]
+        for hexid, (action, entry) in layer_entries.items():
+            if hexid not in present:
                 continue
-            ids = [e.get("id")] + [p for p in e.get("previous_ids", []) if isinstance(p, str)]
-            hexes = [i.split(":", 1)[-1] for i in ids if isinstance(i, str)]
-            if not any(h in present_ids for h in hexes):
-                del doc["images"][ref]
+            if action == "set":
+                doc["layers"][hexid] = entry
+            elif action == "drop":
+                doc["layers"].pop(hexid, None)
+        doc["conda"] = conda
+        for ref in refs:
+            _merge_ref(doc, ref, by_ref.get(ref, []), entries, now)
 
-    update(env_dir, _drop_orphaned_refs)
+    return update(env_dir, fn)
 
-    for d in layers:
-        record_layer(env_dir, d.name, store)
-    record_conda(env_dir)
-    return env_dir / RECORD_NAME
+
+def _short(image_id) -> str:
+    return _hex(image_id)[:12] if _hex(image_id) else "?"
+
+
+def _pkg_lines(pkgs, indent: str) -> list[str]:
+    out = []
+    for p in pkgs if isinstance(pkgs, list) else []:
+        if isinstance(p, dict):
+            out.append(f"{indent}{p.get('manager', '?')!s:<6} {p.get('name', '?')}  "
+                       f"{p.get('change', '?')} {p.get('version', '?')}")
+    return out
 
 
 def show(env_dir: Path) -> str:
@@ -322,19 +490,35 @@ def show(env_dir: Path) -> str:
     for ref, e in sorted(doc["images"].items()):
         if not isinstance(e, dict):
             continue
-        digest = e.get("repo_digests", [None])[0] if e.get("repo_digests") else "no registry digest"
-        out.append(f"  {ref}  {e.get('id', '?')[7:19]}  {e.get('source', '?')}  {digest}")
-        if e.get("previous_ids"):
-            out.append(f"    earlier: {', '.join(i[7:19] for i in e['previous_ids'])}")
+        digests = e.get("repo_digests") if isinstance(e.get("repo_digests"), list) else []
+        digest = digests[0] if digests else "no registry digest"
+        out.append(f"  {ref}  {_short(e.get('id'))}  {e.get('source', '?')}  {digest}")
+        counts = e.get("package_counts")
+        if isinstance(counts, dict):
+            listed = ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"
+            out.append(f"    platform {e.get('platform', 'unknown')}; packages: {listed}")
+        facts = ["Dockerfile on record" if e.get("dockerfile") else "no Dockerfile on record"]
+        if e.get("parent"):
+            facts.append(f"parent {_short(e['parent'])}")
+        if e.get("base"):
+            facts.append(f"built from {_short(e['base'])}")
+        out.append("    " + "; ".join(facts))
+        if isinstance(e.get("previous_ids"), list) and e["previous_ids"]:
+            out.append(f"    earlier: {', '.join(_short(i) for i in e['previous_ids'])}")
+        if "packages" in e:
+            lines = _pkg_lines(e["packages"], "      ")
+            out.append("    built-in package changes:" if lines else "    built-in package changes: none")
+            out += lines
     out += ["", "Container layers:"]
     for hexid, e in sorted(doc["layers"].items()):
+        if not isinstance(e, dict):
+            continue
         out.append(f"  {hexid[:12]}  {e.get('ref')}  ({e.get('engine')})")
-        pkgs = e.get("packages", [])
-        if not pkgs:
-            out.append("    no package changes")
-        for p in pkgs:
-            out.append(f"    {p['manager']:<6} {p['name']}  {p['change']} {p['version']}")
+        lines = _pkg_lines(e.get("packages"), "    ")
+        out += lines or ["    no package changes"]
     out += ["", "Conda environments:"]
     for key, e in sorted(doc["conda"].items()):
+        if not isinstance(e, dict):
+            continue
         out.append(f"  {key}  {e.get('packages')} packages  {e.get('explicit')}")
     return "\n".join(out) + "\n"

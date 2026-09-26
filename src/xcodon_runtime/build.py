@@ -338,7 +338,7 @@ class Builder:
             # build over an earlier `xrunner build` image would overwrite
             # that image's own recorded Dockerfile.
             if image.id != base_image_id:
-                self.rt.images.annotate(image.id, dockerfile=dockerfile_text)
+                self.rt.images.annotate(image.id, dockerfile=dockerfile_text, base=base_image_id)
             for t in tags:
                 image = self.rt.images.tag(image.id, t)
             self.out(f"Successfully built {image.short_id}")
