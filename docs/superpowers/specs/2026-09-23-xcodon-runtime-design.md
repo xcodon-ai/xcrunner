@@ -1026,3 +1026,153 @@ meaning. For `conda`:
 Mounting these envs into containers, conda inside container images (the
 agent's own recipe keeps `|| true`), `conda activate` in the calling
 shell, platforms other than linux-64, and changes to the agent.
+
+## 13. Environment record
+
+Added 2026-09-25. Approved design. xrunner is xcodon's sandbox. A project may
+install tools into its own folder, but what it used must be on record: which
+images, and which packages each install added. This section keeps records
+only. It does not restore, export or pin anything.
+
+### 13.1 Problem
+
+Section 10 keeps container installs in `.xrunner-env/<image-id>/upper` and
+section 12 keeps conda envs under the project, but nothing lists what they
+hold. Images are named by movable tags, so `coala-runtime-python:latest` can
+mean a different image next month. When a tag moves, the next container gets
+a new, empty layer and the earlier installs silently stay behind in the old
+one.
+
+### 13.2 The record file
+
+`<env folder>/environment.json`, where the env folder is the `.xrunner-env`
+directory (or `XRUNNER_ENV_DIR`). "Project root" below means the env
+folder's parent. Paths inside the file are relative to the project root,
+except image names and URLs. The file is JSON with sorted keys and two-space
+indent, and carries `"version": 1`. It has three sections.
+
+`images`: an object keyed by the image ref as the caller wrote it, for
+example `coala-runtime-python:latest`. Each value holds:
+
+- `id`: the image id (config digest, `sha256:...`).
+- `source`: `registry`, `daemon`, or `build` (for `xrunner build` and
+  `commit` images).
+- `repo_digests`: a list of `name@sha256:...` strings that locate this image
+  in a registry, when known: the registry name and manifest digest for a
+  registry pull, or docker's `RepoDigests` for a daemon import. Empty when
+  unknown, as for an image built locally by docker.
+- `dockerfile` and `parent`: for `build` images, the Dockerfile text and the
+  parent image id. `commit` images have `parent` only.
+- `first_used`, `last_used`: UTC times, second precision.
+- `previous_ids`: ids this ref pointed to earlier, oldest first. When a
+  recorded ref resolves to a new id, the old `id` moves here.
+
+`layers`: an object keyed by image id, one entry per `.xrunner-env/<id>`
+folder. Each value holds `ref` (from the folder's `image.json`), `engine`,
+and `packages`: the packages this layer added, changed or removed compared
+with its image, read from files as in 13.3. Each package is
+`{"manager", "name", "version", "change", "location"}` plus `"url"` when the
+metadata has one. `change` is `added`, `changed` or `removed`. `location` is
+the directory inside the container that holds the metadata.
+
+`conda`: an object keyed by env, one entry per host conda env under this
+project's root prefix (section 12) and per `-p` env inside the project root.
+The key is `name:<NAME>` for a `-n` env and `path:<relative path>` for a
+`-p` env. Each value holds `explicit` (the relative path of its
+`conda-explicit.txt`), `sha256` of that file, and `packages` (the count of
+package lines in it).
+
+### 13.3 Reading packages from a layer
+
+Packages come from the files in the layer, never from running commands in
+the container. So recording works on a stopped layer, on either engine, and
+cannot be steered by code in the image. For the ns engine the layer is the
+overlay upper (files present, char device 0:0 whiteouts, opaque directories).
+For the proot engine it is the rootfs copy compared with the image rootfs.
+
+- pip: `*.dist-info` and `*.egg-info` directories whose parent is a
+  `site-packages` or `dist-packages` directory. Name and version come from
+  `METADATA` or `PKG-INFO`. Download caches such as `/root/.cache` also hold
+  `*.dist-info` folders and are ignored by this parent rule.
+- R: a `DESCRIPTION` file in a directory whose parent is an R library, that
+  is a directory named `library` or `site-library`, or one holding a
+  `DESCRIPTION`-bearing sibling with a `Meta/package.rds` file. Name and
+  version come from its `Package:` and `Version:` fields; `url` from
+  `Repository:` when present.
+- apt: `var/lib/dpkg/status` in the layer compared with the image's copy.
+  Stanzas with `Status: install ok installed` are parsed for `Package`,
+  `Architecture` and `Version`.
+- conda inside the image: `conda-meta/*.json` files; `name`, `version` and
+  `url` from the JSON.
+
+A package whose metadata directory is new in the layer is `added`. One that
+exists in both with a different version is `changed`. One whose metadata is
+removed by a whiteout, an opaque parent, or its absence from the proot copy
+is `removed`. A metadata file that cannot be parsed is skipped with a debug
+log, never an error.
+
+### 13.4 When the record is written
+
+- After a successful conda command that changes an env (the RECORD verbs of
+  12.6), for that env's entry.
+- When a container that uses an env folder stops, through `Runtime.stop`,
+  for that container's image and layer entries. `run --rm` stops before it
+  removes, so it records too.
+- When a container is created with an env folder, for the image entry
+  (`id`, `source`, `repo_digests`, times).
+- On demand: `xrunner env record [--env-dir DIR]` rebuilds every section
+  from what is on disk. `DIR` defaults to the env folder found as in 12.3.
+
+Updates hold an exclusive flock on `<env folder>/.environment.lock` while
+they read, merge and write, and write through a temporary file plus
+`os.replace`. A failure to record logs a warning and never changes the exit
+code of the command that triggered it.
+
+### 13.5 Image metadata the store keeps
+
+- A registry pull stores the registry name and the manifest digest it
+  resolved in the image's `manifest.json` as `repo_digest`.
+- A daemon import stores docker's `RepoDigests` (`docker image inspect
+  --format '{{json .RepoDigests}}'`) as `repo_digests`.
+- `xrunner build` stores the Dockerfile text in the final image's
+  `manifest.json` as `dockerfile`.
+
+Images stored before this change lack these fields; their record entries
+have an empty `repo_digests` list.
+
+### 13.6 Tag moves
+
+When a container is created with an env folder and the record already holds
+the same ref at a different image id, xrunner prints one line on stderr:
+`xrunner: <ref> now points to <new short id>; installs made on <old short
+id> stay in .xrunner-env/<old id>`, and the record moves the old id into
+`previous_ids`. Nothing else changes: the container still uses the new
+image and a new layer.
+
+### 13.7 Interfaces
+
+- `xrunner env record [--env-dir DIR]`: rebuild the record; print its path.
+- `xrunner env show [--env-dir DIR] [--json]`: print a readable summary:
+  each image with its id, source and first repo digest; each layer's added,
+  changed and removed packages grouped by manager; each conda env with its
+  package count and explicit file. `--json` prints the file itself.
+- Python: `xcodon_runtime.envrecord.record_all(env_dir) -> Path` and
+  `load(env_dir) -> dict`.
+
+### 13.8 Testing
+
+Unit tests build layers by hand: dist-info folders under site-packages and
+under `/root/.cache`, R `DESCRIPTION` files, a changed dpkg status, conda-meta
+JSON, char device whiteouts (ns engine, inside a user namespace) and a proot
+rootfs copy. They check the parsed packages and `change` values, the conda
+section from real `conda-explicit.txt` files, the relative paths, the tag-move
+warning and `previous_ids`, concurrent updates under the lock, and that a
+record failure never changes an exit code. One test runs a real container
+with an env folder, installs a pip package, stops it, and finds the package
+in the record.
+
+### 13.9 Out of scope
+
+Restoring an environment, exporting images or layers, pinning a ref to an
+id, recording files that no package manager owns, and packages installed
+outside the metadata locations above.
