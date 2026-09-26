@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Python `>=3.10`, stdlib only. Plain English docstrings and messages. Every error derives from `XcodonError`; the CLI maps an uncaught `XcodonError` to exit 125.
-- Pinned micromamba: version `2.9.0`; URL `https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2`; archive SHA-256 `8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd`; `bin/micromamba` SHA-256 `366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3`. Stored at `<home>/bin/micromamba-2.9.0`. linux-64 only.
+- Pinned micromamba: version `2.9.0`; URL `https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2`; archive SHA-256 `8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd`; `bin/micromamba` SHA-256 `366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3`. Stored at `<home>/bin/micromamba-2.9.0/micromamba`: micromamba names itself after its file in the hints it prints, so the file is called `micromamba`. linux-64 only.
 - `XRUNNER_MICROMAMBA` overrides the binary at call time. `xrunner conda` never downloads; a missing binary raises with `micromamba is not installed; run: xrunner shim install conda`.
 - Root prefix order: `-r/--root-prefix` flag, then `<XRUNNER_ENV_DIR>/conda`, then `<nearest .xrunner-env>/conda` searching upward from the working directory, then `<home>/conda`. The home fallback prints one stderr line: `xrunner: no project env folder found; using <root>`.
 - Every micromamba process gets `HOME=<root>/.home`, `XDG_CACHE_HOME=<root>/.home/.cache`, `XDG_CONFIG_HOME=<root>/.home/.config`, `MAMBA_ROOT_PREFIX=<root>`, `CONDA_PKGS_DIRS=<home>/conda-pkgs`, `--no-rc`, and `-r <root>`, except `clean`, which micromamba 2.9.0 rejects `-r` for and which gets the root from `MAMBA_ROOT_PREFIX` alone. The user's real `~/.conda` is never read or written.
@@ -99,19 +99,19 @@ def test_pinned_values_are_the_conda_forge_2_9_0_package():
     assert mm.MICROMAMBA_VERSION == "2.9.0"
     assert mm.MICROMAMBA_URL == "https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2"
     assert mm.MICROMAMBA_ARCHIVE_SHA256 == "8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd"
-    assert mm.MICROMAMBA_BINARY_SHA256 == "790cbf43cb101027c6b7d483903fa155c69bd2ddf8ae03a11a796675a1008575"
+    assert mm.MICROMAMBA_BINARY_SHA256 == "366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3"
 
 
 def test_install_downloads_verifies_and_extracts(home, pinned_fake):
     opener, calls = pinned_fake
     path = mm.install_micromamba(home, opener=opener)
-    assert path == home.path / "bin" / "micromamba-2.9.0" == mm.pinned_path(home)
+    assert path == home.path / "bin" / "micromamba-2.9.0" / "micromamba" == mm.pinned_path(home)
     assert path.read_bytes() == FAKE_BINARY
     assert os.access(path, os.X_OK)
     assert calls == [mm.MICROMAMBA_URL]
     assert mm.install_micromamba(home, opener=opener) == path
     assert calls == [mm.MICROMAMBA_URL], "a verified binary is not downloaded again"
-    assert [p.name for p in path.parent.iterdir()] == ["micromamba-2.9.0"], "no temp files left"
+    assert [p.name for p in path.parent.iterdir()] == ["micromamba"], "no temp files left"
 
 
 def test_install_rejects_a_wrong_archive_checksum(home, pinned_fake, monkeypatch):
@@ -203,7 +203,7 @@ from xcodon_runtime.home import RuntimeHome
 MICROMAMBA_VERSION = "2.9.0"
 MICROMAMBA_URL = "https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2"
 MICROMAMBA_ARCHIVE_SHA256 = "8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd"
-MICROMAMBA_BINARY_SHA256 = "790cbf43cb101027c6b7d483903fa155c69bd2ddf8ae03a11a796675a1008575"
+MICROMAMBA_BINARY_SHA256 = "366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3"
 MICROMAMBA_ENV = "XRUNNER_MICROMAMBA"
 _MEMBER = "bin/micromamba"
 _CHUNK = 1 << 20
@@ -214,7 +214,7 @@ class MicromambaMissing(XcodonError):
 
 
 def pinned_path(home: RuntimeHome) -> Path:
-    return home.path / "bin" / f"micromamba-{MICROMAMBA_VERSION}"
+    return home.path / "bin" / f"micromamba-{MICROMAMBA_VERSION}" / "micromamba"
 
 
 def _sha256(path: Path) -> str:
@@ -1245,7 +1245,7 @@ def test_install_writes_three_forwarding_shims(home, tmp_path, fake_mm, empty_pa
         assert text.rstrip().endswith('conda "$@"') and "xrunner" in text
         assert os.access(p, os.X_OK) and is_xrunner_shim(p)
         assert f"installed {p}" in out
-    assert (home.path / "bin" / "micromamba-2.9.0").read_bytes() == fake_mm.read_bytes()
+    assert (home.path / "bin" / "micromamba-2.9.0" / "micromamba").read_bytes() == fake_mm.read_bytes()
     assert "add it to PATH" in out
     env = {"PATH": f"{shim_dir}:/usr/bin:/bin", "XCODON_RUNTIME_HOME": str(home.path), "HOME": str(tmp_path)}
     r = subprocess.run(["mamba", "--version"], env=env, capture_output=True, text=True, timeout=60)

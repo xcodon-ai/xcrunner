@@ -822,10 +822,23 @@ The root prefix is the first of:
    searching from the working directory up to the filesystem root.
 3. `<home>/conda`, under the xrunner runtime home.
 
+Rule 2 accepts a `.xrunner-env` only when its resolved directory (after
+following links) is owned by the current user and is not writable by group
+or others. Any other one, such as another user's `/tmp/.xrunner-env`, is
+skipped and the search goes on upward; otherwise `conda run` would exec
+that user's binaries and source their `activate.d` scripts.
+`XRUNNER_ENV_DIR` and `-r` are trusted as given, because the caller chose
+them.
+
 An explicit `-r/--root-prefix` on the command line wins over all three.
 The root prefix is created if it is missing. `-n NAME` envs live at
 `<root>/envs/NAME`. `-p PATH` envs live exactly at PATH; a relative PATH is
-taken from the working directory. `conda install` with neither flag targets
+taken from the working directory. Before calling micromamba, xrunner
+rewrites every `-p/--prefix` value to an absolute path, `<cwd>/PATH`, on
+every verb and in every form (`-p PATH`, `-pPATH`, `--prefix=PATH`).
+Micromamba 2.9.0 reads a relative value with no `/` as an env name
+(`<root>/envs/PATH`); the rewrite keeps micromamba, the rerun record and
+`conda run` on the same folder. `conda install` with neither flag targets
 the root prefix itself, as conda's base does.
 
 The agent passes `XRUNNER_ENV_DIR` only to the coala-runtime process, not
@@ -835,7 +848,9 @@ project root, which holds `.xrunner-env`. A launcher may also export
 
 `.xrunner-env` appears only once a container has started, so an early conda
 call can fall through to rule 3. xrunner then prints one warning line on
-stderr naming the root it used. Lookups of an existing `-n NAME` env, for
+stderr naming the root it used, and how to avoid it: `xrunner: no project
+env folder found; using <root> (set XRUNNER_ENV_DIR or create .xrunner-env
+in the project)`. Lookups of an existing `-n NAME` env, for
 `run`, `list`, `env export`, `remove`, `env remove`, `uninstall`, `install`
 and `update`, try the resolved root first and then `<home>/conda`, so an env
 created before the project folder existed is still found. Creates always go
@@ -847,8 +862,10 @@ private `<root>/.home`), so a bare `conda list` or `conda run` targeting the
 root itself finds an environment there.
 
 The package cache is shared: `CONDA_PKGS_DIRS=<home>/conda-pkgs`. A second
-project that needs the same package links it from the cache instead of
-downloading it again. Micromamba locks the cache and each prefix itself.
+project that needs the same package takes it from the cache instead of
+downloading it again. The cache hardlinks packages into an env when it is on
+the same filesystem as the env, and copies them otherwise. Micromamba locks
+the cache and each prefix itself.
 
 ### 12.4 Isolation from the user's conda
 
@@ -880,7 +897,8 @@ The user's real `~/.conda` is never read or written.
 - `run`: implemented by xrunner, not micromamba. Micromamba 2.9.0's `run`
   fails on this host with `exec: --: invalid option` from its own wrapper
   script. xrunner parses `-n NAME` or `-p PATH` (both together is an error:
-  "use -n NAME or -p PATH, not both"), honors `--cwd DIR`, and accepts and
+  "use -n NAME or -p PATH, not both"); a relative PATH is made absolute
+  from the working directory, the same rewrite as in 12.3. It honors `--cwd DIR`, and accepts and
   ignores `--no-capture-output` and `--live-stream`. `conda run --help`/`-h`
   prints xrunner's own usage for `run` and exits 0. It sets
   `PATH=<prefix>/bin:$PATH`, falling back to `os.defpath` when the calling
@@ -892,8 +910,9 @@ The user's real `~/.conda` is never read or written.
   disposition, so an unpatched command would inherit an ignored SIGPIPE and
   survive a broken pipe instead of dying from it. When
   `<prefix>/etc/conda/activate.d` holds `*.sh` scripts, the command runs as
-  `/bin/sh -c '. SCRIPT; ...; exec "$@"' sh CMD ARGS...` so those scripts
-  apply. A missing env exits 1 with `EnvironmentLocationNotFound: Not a
+  `/bin/bash -c '. SCRIPT; ...; exec "$@"' bash CMD ARGS...` so those scripts
+  apply. Real conda on Linux sources them with bash too. When `/bin/bash` is
+  missing, `/bin/sh` takes its place (`/bin/sh -c ... sh CMD ARGS...`). A missing env exits 1 with `EnvironmentLocationNotFound: Not a
   conda environment: <path>`.
 - `activate`, `deactivate`, `init` and `shell` exit 1 with a message that
   points to `conda run -n NAME CMD` or to `<prefix>/bin/CMD`. Activation
@@ -901,6 +920,9 @@ The user's real `~/.conda` is never read or written.
 - `--version` and `-V` print `conda <micromamba version> (micromamba via
   xrunner)`.
 - Any other verb exits 2 with a message naming the supported verbs.
+- An option that needs a value (`-r`, `-n`, `-p`) never takes the next
+  token as its value when that token is itself an option: `conda list -r
+  -n c` exits 2 with `conda: -r needs a value`.
 - Options before the verb, such as `--json` or `-q`, pass through as given.
   This also holds for `run` (`conda -r ROOT run -n NAME CMD` works, not only
   `conda run -r ROOT -n NAME CMD`). The `mamba` and `micromamba` shims reach
@@ -926,6 +948,10 @@ line (which `conda env export` also writes) is ignored. With neither a name
 in the file nor `-n`/`-p` on the command line, it exits 1 with "No target
 prefix specified", the same as real micromamba.
 
+After a successful `remove --all` (or `-a`, on `remove` and `uninstall`) or
+`env remove`, the env holds no packages: xrunner writes no record and
+deletes any `conda-explicit.txt` left in that prefix.
+
 When one of those commands exits 0 but leaves no `<prefix>/conda-meta` at
 the target (for example an `install` into an env that was never created),
 xrunner cannot export it and prints a warning naming the prefix instead of
@@ -937,8 +963,11 @@ writing `conda-explicit.txt`; the command's own exit code is unchanged.
   URL, the archive's SHA-256 and the SHA-256 of `bin/micromamba` live in
   `micromamba.py`. Other platforms are an error.
 - `xrunner shim install conda` downloads it once into
-  `<home>/bin/micromamba-<version>`, checks the SHA-256, writes it through a
-  temporary file and a rename, and marks it executable.
+  `<home>/bin/micromamba-<version>/micromamba`, checks the SHA-256, writes it
+  through a temporary file and a rename, and marks it executable. The file
+  is named `micromamba` because micromamba names itself after its file in
+  the hints and errors it prints (`micromamba run -n ...`), and that is the
+  name the shim serves.
 - `--micromamba PATH` copies an existing binary instead, for hosts without
   network access to the release. The environment variable
   `XRUNNER_MICROMAMBA` points xrunner at a binary at call time.

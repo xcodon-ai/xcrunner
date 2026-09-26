@@ -103,13 +103,22 @@ Agents often install command-line tools with `conda create`, `conda install` and
     xrunner shim install conda --dir ~/.xcodon/shim
     export PATH="$HOME/.xcodon/shim:$PATH"
 
-This downloads a pinned micromamba (2.9.0, from conda-forge, checksum-verified) and
-writes `conda`, `mamba` and `micromamba` scripts that forward to `xrunner conda`.
+This downloads a pinned micromamba (2.9.0, from conda-forge, checksum-verified) to
+`<xrunner home>/bin/micromamba-2.9.0/micromamba` and writes `conda`, `mamba` and
+`micromamba` scripts that forward to `xrunner conda`.
 Offline, pass `--micromamba PATH` to use a binary you already have.
 
 - Environments live in the project's `.xrunner-env/conda` (found from the working
   directory, or from `XRUNNER_ENV_DIR`), else under the xrunner home. Downloads are
-  cached once under the xrunner home.
+  cached once under the xrunner home. A `.xrunner-env` found by searching upward is
+  used only when you own it and no one else can write to it.
+- Launchers should export `XRUNNER_ENV_DIR=<project>/.xrunner-env`, or create
+  `<project>/.xrunner-env`, before the agent starts. Otherwise an early conda call
+  falls back to the xrunner home: its envs land outside the project, `conda env
+  list` in the project does not show them, and the agent's `run_shell` guardrail
+  refuses their paths.
+- A relative `-p PATH` is always a folder under the working directory, even
+  without a `/`.
 - Your own `~/.conda` and `~/.condarc` are never read or written.
 - `conda run -n NAME CMD` runs CMD with the env on PATH; `conda activate` is not
   supported, because it changes the calling shell.
