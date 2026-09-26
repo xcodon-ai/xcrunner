@@ -1248,3 +1248,42 @@ Known cost: on the proot engine each stop rescans the whole rootfs copy,
 since there is no upper directory to read. That takes about 3-4 s on large
 images (1.3 s on the da-10-1 Python image with a warm disk cache). The image
 inventory itself is scanned once and cached.
+
+## 14. Sandbox activation
+
+Added 2026-09-26. Approved design. With `--container-engine xrunner`, the
+agent's own tool calls (its host shell, its docker image builder) must reach
+xrunner without anyone editing PATH or installing shims by hand.
+
+### 14.1 Shape
+
+`xcodon_runtime.sandbox.activate(env_dir, home=None, environ=None) -> dict`:
+
+- `env_dir` is the project's env folder, an absolute path. It is created if
+  missing.
+- It writes `docker`, `conda`, `mamba` and `micromamba` shims (sections 11.4
+  and 12.8) into `<env_dir>/bin`. The folder is xrunner's own, so existing
+  files there are replaced without `--force`. If `<env_dir>/bin` exists and
+  is not a real directory, for example a symlink, it raises XcodonError and
+  writes nothing.
+- It makes sure the pinned micromamba is present (12.7), downloading it once
+  into the xrunner home. A failed download logs a warning and activation
+  still succeeds; conda calls then fail with 12.7's message.
+- It returns `{"PATH": "<env_dir>/bin:<PATH without that entry>",
+  "XRUNNER_ENV_DIR": "<env_dir>"}`. Calling it again returns the same values.
+
+The shims live inside the project and only reach processes that apply the
+returned PATH, so they never shadow a real docker or conda for anything else.
+xrunner's own daemon source skips shims (11.4), so a real docker daemon is
+still used as an image source.
+
+`xrunner sandbox activate ENV_DIR` does the same and prints `export` lines
+for a shell.
+
+### 14.2 The agent hook
+
+opencodon calls `activate` once at the start of each agent session when its
+effective container engine is `xrunner`, and applies the result to its own
+`os.environ`. Every command the agent starts inherits it: `run_shell`, the
+docker image builder, and MCP servers. A failure to activate logs a warning
+and the session continues without the shims.

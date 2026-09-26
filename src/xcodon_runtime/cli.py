@@ -582,6 +582,18 @@ def cmd_shim(rt: Runtime, args) -> int:
     return 0
 
 
+def cmd_sandbox(rt: Runtime, args) -> int:
+    """Print shell `export` lines that make this project an xrunner sandbox (spec 14)."""
+    from xcodon_runtime.sandbox import activate
+
+    if not os.path.isabs(args.env_dir):
+        raise UsageError(f"the env folder must be an absolute path: {args.env_dir}")
+    for key, value in activate(args.env_dir, home=rt.home).items():
+        quoted = value.replace("'", "'\\''")
+        print(f"export {key}='{quoted}'")
+    return 0
+
+
 # -- parser --------------------------------------------------------------------------
 
 
@@ -710,6 +722,12 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--env-dir")
     i.add_argument("--json", action="store_true")
     i.set_defaults(func=cmd_env)
+
+    s = sub.add_parser("sandbox", help="route a project's docker and conda calls through xrunner")
+    sbsub = s.add_subparsers(dest="sandbox_cmd", required=True)
+    i = sbsub.add_parser("activate", help="write the project's shims and print the export lines to apply")
+    i.add_argument("env_dir", help="the project's env folder, an absolute path (usually <project>/.xrunner-env)")
+    i.set_defaults(func=cmd_sandbox)
 
     s = sub.add_parser("shim", help="install docker or conda commands that forward to xrunner")
     ssub = s.add_subparsers(dest="shim_cmd", required=True)

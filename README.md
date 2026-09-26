@@ -132,6 +132,15 @@ Offline, pass `--micromamba PATH` to use a binary you already have.
   wherever the shims run, or they will look for micromamba in the default home
   instead.
 
+## Sandbox activation
+
+`xrunner sandbox activate /abs/project/.xrunner-env` writes `docker`, `conda`,
+`mamba` and `micromamba` shims into the project's `.xrunner-env/bin` and prints
+the two `export` lines (PATH first, then `XRUNNER_ENV_DIR`) that send a shell's
+docker and conda calls to xrunner. The Python API is
+`xcodon_runtime.sandbox.activate(env_dir)`. opencodon calls it by itself when
+its container engine is `xrunner`, so `--container-engine xrunner` is enough.
+
 ## Environment record
 
 xrunner keeps `.xrunner-env/environment.json`, a per-project record of the images a
