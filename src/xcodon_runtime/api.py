@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from xcodon_runtime import __version__
+from xcodon_runtime import __version__, envrecord
 from xcodon_runtime.containers import Container, ContainerStore, _rmtree_tolerant
 from xcodon_runtime.daemon import DaemonSource
 from xcodon_runtime.engine import Bind, Engine, EngineChoice, get_engine, select_engine
@@ -79,6 +79,13 @@ class Runtime:
         self._engine_override = engine
         self._choice: EngineChoice | None = None
         self._engines: dict[str, Engine] = {}
+
+    def _record(self, fn) -> None:
+        """Update the project's environment record; a failure only warns (spec 13.4)."""
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001 - recording must never break a run
+            log.warning("could not update the environment record: %s", e)
 
     # -- engines -----------------------------------------------------------------
 
@@ -197,6 +204,7 @@ class Runtime:
         c = self.store.create(container_id, image, ref, spec, list(binds), engine, name, env_dir=env_dir_s)
         if env_dir_s is not None:
             Path(env_dir_s).mkdir(parents=True, exist_ok=True)
+            self._record(lambda: envrecord.note_image(Path(env_dir_s), ref, image, self.images))
         return c
 
     def start(self, c: Container) -> None:
@@ -245,6 +253,8 @@ class Runtime:
         self._engine(c).stop(c)
         c.state = "exited"
         c.save()
+        if c.env_dir:
+            self._record(lambda: envrecord.record_layer(Path(c.env_dir), c.image_id, self.images))
 
     def remove(self, c: Container, force: bool = False) -> None:
         # Consult the container's own tracked state first, not the engine

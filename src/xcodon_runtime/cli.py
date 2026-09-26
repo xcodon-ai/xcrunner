@@ -508,6 +508,30 @@ def cmd_conda(rt: Runtime, args) -> int:
     return conda_main(list(args.rest), rt.home)
 
 
+def _env_folder(args) -> Path:
+    from xcodon_runtime.condaroot import find_env_folder
+
+    if args.env_dir:
+        return Path(args.env_dir).expanduser().resolve()
+    found = find_env_folder(Path.cwd(), os.environ)
+    if found is None:
+        raise UsageError("no env folder found here; pass --env-dir DIR or set XRUNNER_ENV_DIR")
+    return found
+
+
+def cmd_env(rt: Runtime, args) -> int:
+    from xcodon_runtime import envrecord
+
+    env_dir = _env_folder(args)
+    if args.env_cmd == "record":
+        print(envrecord.record_all(env_dir, rt.images))
+    elif args.json:
+        print(json.dumps(envrecord.load(env_dir), indent=2, sort_keys=True))
+    else:
+        print(envrecord.show(env_dir), end="")
+    return 0
+
+
 def cmd_shim(rt: Runtime, args) -> int:
     from xcodon_runtime.micromamba import install_micromamba
     from xcodon_runtime.shim import CONDA_MARKER, CONDA_NAMES, check_install, path_hint, write_shim
@@ -649,6 +673,16 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("conda", help="conda's command line over a pinned micromamba (see `xrunner conda --help`)",
                        add_help=False)
     s.set_defaults(func=cmd_conda, rest=[])
+
+    s = sub.add_parser("env", help="the project's environment record (images and package lists)")
+    esub = s.add_subparsers(dest="env_cmd", required=True)
+    i = esub.add_parser("record", help="rebuild .xrunner-env/environment.json from what is on disk")
+    i.add_argument("--env-dir")
+    i.set_defaults(func=cmd_env, json=False)
+    i = esub.add_parser("show", help="print the environment record")
+    i.add_argument("--env-dir")
+    i.add_argument("--json", action="store_true")
+    i.set_defaults(func=cmd_env)
 
     s = sub.add_parser("shim", help="install docker or conda commands that forward to xrunner")
     ssub = s.add_subparsers(dest="shim_cmd", required=True)

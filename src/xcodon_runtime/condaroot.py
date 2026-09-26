@@ -74,17 +74,32 @@ def _trusted_env_folder(d: Path) -> bool:
     return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not (st.st_mode & 0o022)
 
 
+def _find_env_folder_with_source(cwd: Path, environ: Mapping[str, str]) -> tuple[Path, str] | None:
+    """``find_env_folder``'s result, plus which rule matched: "env" or "project"."""
+    env_dir = environ.get(ENV_DIR_VAR)
+    if env_dir:
+        return Path(env_dir), "env"
+    for d in (cwd, *cwd.parents):
+        if _trusted_env_folder(d / ENV_FOLDER_NAME):
+            return d / ENV_FOLDER_NAME, "project"
+    return None
+
+
+def find_env_folder(cwd: Path, environ: Mapping[str, str]) -> Path | None:
+    """XRUNNER_ENV_DIR, else the nearest trusted .xrunner-env above cwd, else None."""
+    found = _find_env_folder_with_source(cwd, environ)
+    return found[0] if found else None
+
+
 def resolve_root(cwd: Path, environ: Mapping[str, str], home: RuntimeHome,
                  explicit: str | None = None) -> Root:
     if explicit:
         p = Path(explicit)
         return Root(p if p.is_absolute() else cwd / p, "flag")
-    env_dir = environ.get(ENV_DIR_VAR)
-    if env_dir:
-        return Root(Path(env_dir) / ROOT_DIRNAME, "env")
-    for d in (cwd, *cwd.parents):
-        if _trusted_env_folder(d / ENV_FOLDER_NAME):
-            return Root(d / ENV_FOLDER_NAME / ROOT_DIRNAME, "project")
+    found = _find_env_folder_with_source(cwd, environ)
+    if found:
+        folder, source = found
+        return Root(folder / ROOT_DIRNAME, source)
     return Root(home.path / ROOT_DIRNAME, "home")
 
 

@@ -350,8 +350,16 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
     code = subprocess.run(micromamba_argv(mm, p, root.path), env=env, cwd=cwd).returncode
     if code != 0 or DRY_RUN_FLAGS & set(p.tokens):
         return code
-    if p.key == "env remove" or (p.key in REMOVE_ALL_VERBS and p.remove_all):
+    is_drop = p.key == "env remove" or (p.key in REMOVE_ALL_VERBS and p.remove_all)
+    if is_drop:
         _drop_record(target_prefix(p, root.path, cwd), err)
     elif p.key in RECORD:
         _write_record(mm, target_prefix(p, root.path, cwd), root.path, env, cwd, err)
+    if (is_drop or p.key in RECORD) and root.source in ("env", "project"):
+        try:
+            from xcodon_runtime.envrecord import record_conda
+
+            record_conda(root.path.parent)
+        except Exception as e:  # noqa: BLE001 - recording must never change the exit code
+            print(f"xrunner: warning: could not update the environment record: {e}", file=err)
     return code

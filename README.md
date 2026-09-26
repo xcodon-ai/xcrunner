@@ -132,6 +132,17 @@ Offline, pass `--micromamba PATH` to use a binary you already have.
   wherever the shims run, or they will look for micromamba in the default home
   instead.
 
+## Environment record
+
+xrunner keeps `.xrunner-env/environment.json`, a per-project record of the images a
+project used (id, source, registry digests, and any build Dockerfile) and the
+packages each install added, changed or removed.
+
+The record updates automatically after conda changes and when containers stop.
+`xrunner env show` prints it, and `xrunner env record` rebuilds it from what is on
+disk. It is a record, not a restore mechanism: it does not recreate images or
+packages, only describes what happened.
+
 ## Hosts without docker
 
 On a host with no docker daemon, a `FROM` name that only ever existed in a
