@@ -173,9 +173,9 @@ class RegistryClient:
         with self._get(ref, f"manifests/{manifest_ref}", MANIFEST_ACCEPT) as r:
             body = r.read()
             media_type = r.headers.get("Content-Type", "").split(";")[0].strip()
-            digest = r.headers.get("Docker-Content-Digest") or ""
-        if not digest.startswith("sha256:"):
-            digest = "sha256:" + hashlib.sha256(body).hexdigest()
+        # The digest of a manifest is the sha256 of its bytes, by definition.
+        # The Docker-Content-Digest header is not trusted: it is computed here.
+        digest = "sha256:" + hashlib.sha256(body).hexdigest()
         data = json.loads(body)
         data.setdefault("mediaType", media_type)
         return data, digest

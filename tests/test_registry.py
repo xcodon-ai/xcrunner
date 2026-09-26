@@ -150,10 +150,10 @@ def test_other_registry_404_keeps_the_plain_error(home, reg):
     assert "HTTP 404" in str(info.value) and "Docker Hub" not in str(info.value)
 
 
-def test_manifest_digest_falls_back_to_the_body_hash_when_the_header_is_missing(home, reg):
+def test_manifest_digest_is_the_body_hash_whatever_the_header_says(home, reg):
     layers = [layer_bytes("a", b"A")]
     reg.add_image("lib/nodigest", "latest", config_for(layers), layers)
-    reg.send_digest_header = False
+    reg.lying_digest_header = True
     client = RegistryClient(home, scheme="http")
     fetched = client.fetch(Reference(reg.host, "lib/nodigest", "latest"), Platform("linux", "amd64"))
     body, _ = reg.manifests[("lib/nodigest", "latest")]
