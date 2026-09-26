@@ -255,7 +255,8 @@ def ns_layer_packages(upper: Path, base: list[Pkg]) -> list[Pkg]:
                 continue
             _drop_under(merged, cpath)
             for pkg in pkgs:
-                merged[pkg.key] = pkg
+                if pkg.key not in merged or _natural_sort_key(pkg.version) > _natural_sort_key(merged[pkg.key].version):
+                    merged[pkg.key] = pkg
             if is_dir:
                 dirnames.remove(name)
     return sorted(merged.values(), key=lambda p: p.key)

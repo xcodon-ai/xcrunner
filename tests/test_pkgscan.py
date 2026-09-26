@@ -139,28 +139,25 @@ def test_dpkg_status_file_larger_than_1mb(tmp_path):
     status_file = status_dir / "status"
 
     stanzas = []
-    for i in range(100):
+    for i in range(5000):
+        desc_lines = "\n ".join([f"description line {j}" for j in range(10)])
         stanzas.append(f"""Package: pkg{i}
 Status: install ok installed
 Architecture: amd64
 Version: 1.0.0
-Description: A package with a long description
- to make the file size larger
- and ensure we exceed 1 MiB
- when we have enough stanzas
- This is a long description field
- that spans multiple lines
- and contains lots of text
- to inflate the file size
+Description: Package {i} with a long description
+ {desc_lines}
 
 """)
 
     status_text = "\n".join(stanzas)
     status_file.write_text(status_text)
 
+    assert status_file.stat().st_size > (1 << 20), f"Status file only {status_file.stat().st_size} bytes, need > 1 MiB"
+
     got = scan_tree(root)
     pkg_names = {p.name for p in got}
-    for i in range(100):
+    for i in range(5000):
         assert f"pkg{i}:amd64" in pkg_names, f"Package pkg{i} was not found in scan_tree result"
 
 
@@ -259,3 +256,14 @@ def test_00lock_directory_is_skipped(tmp_path):
 
     got = scan_tree(root)
     assert len(got) == 0
+
+
+def test_ns_layer_packages_keeps_highest_version(tmp_path):
+    """Test that ns_layer_packages applies highest-version rule like scan_tree."""
+    upper = tmp_path / "upper"
+    pip_pkg(upper, "foo", "1.9.0")
+    pip_pkg(upper, "foo", "1.10.0")
+
+    got = ns_layer_packages(upper, [])
+    versions = {p.version for p in got if p.name == "foo"}
+    assert versions == {"1.10.0"}, f"Expected foo 1.10.0, got {versions}"
