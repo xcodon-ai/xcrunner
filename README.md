@@ -223,5 +223,3 @@ autodetection after Docker and Podman and before Apptainer.
     python scripts/fetch_proot.py          # only if _bin/ is missing
     pytest -q                              # unit + ns + proot on a capable host
     XCODON_TEST_NETWORK=1 pytest -m network
-
-Design: `docs/superpowers/specs/2026-09-23-xcodon-runtime-design.md`.
