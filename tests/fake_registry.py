@@ -28,6 +28,7 @@ class FakeRegistry:
         self.issued_token: str | None = None
         self.token_status = 200  # set to 401/404 to make /token itself fail
         self.truncate: set[str] = set()  # digests to serve half of, while still declaring the full length
+        self.send_digest_header = True  # set False to omit Docker-Content-Digest on manifest responses
 
     def add_image(self, repo: str, tag: str, config: dict, layers: list[bytes], multi_arch: bool = False) -> str:
         config_bytes = json.dumps(config).encode()
@@ -128,7 +129,8 @@ class FakeRegistry:
                     body, mt = hit
                     self.send_response(200)
                     self.send_header("Content-Type", mt)
-                    self.send_header("Docker-Content-Digest", digest_of(body))
+                    if reg.send_digest_header:
+                        self.send_header("Docker-Content-Digest", digest_of(body))
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)

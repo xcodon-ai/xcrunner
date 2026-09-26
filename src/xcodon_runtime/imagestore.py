@@ -214,7 +214,7 @@ class ImageStore:
         cache = image.dir / "packages.json"
         try:
             data = json.loads(cache.read_text())
-            if data.get("version") == 1:
+            if isinstance(data, dict) and data.get("version") == 1:
                 return [pkg_from_json(d) for d in data["packages"]]
         except (OSError, ValueError, KeyError, TypeError):
             pass

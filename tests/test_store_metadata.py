@@ -76,6 +76,44 @@ def test_build_records_its_dockerfile(home, busybox_image, engine_name, tmp_path
     assert m["dockerfile"] == text and m["source"] == "commit"
 
 
+def test_build_with_only_from_does_not_annotate_the_base_image(home, busybox_image, engine_name, tmp_path):
+    """FROM alone (or FROM plus only ignored lines) ends on the base image itself:
+    that image must not gain a dockerfile field, whether it was pulled or was
+    itself the final image of an earlier `xrunner build`."""
+    rt = Runtime(home.path, engine=engine_name)
+    assert "dockerfile" not in rt.images.manifest(busybox_image)
+
+    ctx = tmp_path / "ctx-from-only"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM xcodon-test/busybox\n")
+    img = rt.build(ctx)
+    assert img.id == busybox_image.id
+    assert "dockerfile" not in rt.images.manifest(busybox_image)
+
+    ctx2 = tmp_path / "ctx-from-expose"
+    ctx2.mkdir()
+    (ctx2 / "Dockerfile").write_text("FROM xcodon-test/busybox\nEXPOSE 80\n")
+    img2 = rt.build(ctx2)
+    assert img2.id == busybox_image.id
+    assert "dockerfile" not in rt.images.manifest(busybox_image)
+
+
+def test_package_inventory_treats_a_non_object_cache_as_a_miss(home, tmp_path):
+    """packages.json with valid but non-dict JSON (e.g. `[]`) must not crash; it
+    is treated like any other unusable cache and the rootfs is rescanned."""
+    from tests.conftest import pack_rootfs_as_image
+
+    root = tmp_path / "rootfs-nonobj"
+    meta = root / "usr/lib/python3/site-packages/demo2-1.0.dist-info"
+    meta.mkdir(parents=True)
+    (meta / "METADATA").write_text("Name: demo2\nVersion: 1.0\n")
+    img = pack_rootfs_as_image(home, root, "xcodon-test/inv-nonobj:1")
+    (img.dir / "packages.json").write_text("[]")
+    st = ImageStore(home, sources=[])
+    pkgs = st.package_inventory(img)
+    assert [(p.manager, p.name, p.version) for p in pkgs] == [("pip", "demo2", "1.0")]
+
+
 def test_package_inventory_is_cached(home, tmp_path):
     from tests.conftest import pack_rootfs_as_image
 

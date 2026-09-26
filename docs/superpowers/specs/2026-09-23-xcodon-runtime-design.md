@@ -1059,8 +1059,10 @@ example `coala-runtime-python:latest`. Each value holds:
   `commit` images).
 - `repo_digests`: a list of `name@sha256:...` strings that locate this image
   in a registry, when known: the registry name and manifest digest for a
-  registry pull, or docker's `RepoDigests` for a daemon import. Empty when
-  unknown, as for an image built locally by docker.
+  registry pull, or docker's `RepoDigests` for a daemon import. The list is
+  empty when nothing is known. Docker's containerd image store may list a
+  `RepoDigests` entry even for an image built locally, and that entry is not
+  guaranteed to exist in any registry.
 - `dockerfile` and `parent`: for `build` images, the Dockerfile text and the
   parent image id. `commit` images have `parent` only.
 - `first_used`, `last_used`: UTC times, second precision.
@@ -1142,9 +1144,12 @@ code of the command that triggered it.
 ### 13.5 Image metadata the store keeps
 
 - A registry pull stores the registry name and the manifest digest it
-  resolved in the image's `manifest.json` as `repo_digest`.
+  resolved as a one-element `repo_digests` list in the image's
+  `manifest.json`.
 - A daemon import stores docker's `RepoDigests` (`docker image inspect
-  --format '{{json .RepoDigests}}'`) as `repo_digests`.
+  --format '{{json .RepoDigests}}'`) as `repo_digests`. Docker reports short
+  names there (for example `busybox@sha256:...`), while xrunner's own
+  registry pulls record full names (`docker.io/library/busybox@sha256:...`).
 - `xrunner build` stores the Dockerfile text in the final image's
   `manifest.json` as `dockerfile`.
 

@@ -267,6 +267,7 @@ class Builder:
                     if len(tokens) > 1:
                         raise XcodonError(f"line {ins.line}: multi-stage builds (FROM ... AS name) are not supported")
                     image = self.rt.resolve_image(tokens[0])
+                    base_image_id = image.id
                     held.enter_context(self.rt.home.lock("store", shared=True))
                     args = {}
                     shell = list(image.config.get("config", {}).get("Shell") or DEFAULT_SHELL)
@@ -329,7 +330,15 @@ class Builder:
                 self._cache_put(key, image.id)
 
             assert image is not None
-            self.rt.images.annotate(image.id, dockerfile=dockerfile_text)
+            # Only a real build step (RUN/COPY/ENV/...) makes a new image
+            # distinct from the one FROM resolved to. When the Dockerfile is
+            # only FROM (plus ignored lines like EXPOSE), the "final image"
+            # is that base image, and it must not be annotated with this
+            # Dockerfile: a pulled image would wrongly gain one, and a no-op
+            # build over an earlier `xrunner build` image would overwrite
+            # that image's own recorded Dockerfile.
+            if image.id != base_image_id:
+                self.rt.images.annotate(image.id, dockerfile=dockerfile_text)
             for t in tags:
                 image = self.rt.images.tag(image.id, t)
             self.out(f"Successfully built {image.short_id}")
