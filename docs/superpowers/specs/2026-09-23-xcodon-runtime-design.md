@@ -1172,7 +1172,7 @@ image and a new layer.
   each image with its id, source and first repo digest; each layer's added,
   changed and removed packages grouped by manager; each conda env with its
   package count and explicit file. `--json` prints the file itself.
-- Python: `xcodon_runtime.envrecord.record_all(env_dir) -> Path` and
+- Python: `xcodon_runtime.envrecord.record_all(env_dir, store) -> Path` and
   `load(env_dir) -> dict`.
 
 ### 13.8 Testing
