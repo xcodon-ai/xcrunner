@@ -56,7 +56,7 @@ def _busybox() -> Path | None:
 
 BUSYBOX = _busybox()
 APPLETS = ["sh", "id", "hostname", "ls", "cat", "head", "touch", "sleep", "echo", "env", "pwd", "true", "false",
-           "rm", "mkdir", "chmod"]
+           "rm", "mkdir", "chmod", "mkfifo"]
 
 
 def build_busybox_rootfs(dest: Path) -> Path:

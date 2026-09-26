@@ -79,20 +79,60 @@ def is_opaque(path: Path) -> bool:
     return False
 
 
-def _read(path: Path) -> str | None:
+def _is_regular(path: Path) -> bool:
+    """True for a regular file that is not a symlink. Used for existence checks in a metadata folder."""
     try:
-        with open(path, "rb") as f:
-            return f.read(_MAX_META).decode("utf-8-sig", errors="replace")
+        return stat.S_ISREG(os.lstat(path).st_mode)
     except OSError:
-        return None
+        return False
 
 
-def _read_large(path: Path) -> str | None:
+def read_bytes(path: Path, cap: int) -> bytes | None:
+    """Up to ``cap`` bytes of a regular file, or None.
+
+    The file comes from a container layer, so it is untrusted: a symlink is
+    never followed (``O_NOFOLLOW``), a FIFO or device never blocks the open
+    (``O_NONBLOCK``) and is rejected by ``fstat``, and the read is capped.
+    Any OSError gives None.
+    """
     try:
-        with open(path, "rb") as f:
-            return f.read(_MAX_DPKG).decode("utf-8-sig", errors="replace")
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
         return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, left = [], cap
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _read_file(path: Path, cap: int) -> str | None:
+    """``read_bytes`` decoded as UTF-8 (a BOM is dropped, bad bytes are replaced)."""
+    data = read_bytes(path, cap)
+    return None if data is None else data.decode("utf-8-sig", errors="replace")
+
+
+def _json_dict(text: str | None) -> dict | None:
+    """Parse untrusted JSON; anything but an object (or unparsable, or too deep) gives None."""
+    try:
+        d = json.loads(text or "")
+    except (ValueError, RecursionError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _str_or_none(value) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _headers(text: str | None) -> dict[str, str]:
@@ -116,27 +156,25 @@ def _parent(cpath: str) -> str:
     return str(PurePosixPath(cpath).parent)
 
 
-def _pip(host: Path, cpath: str) -> Pkg | None:
-    if host.is_dir():
+def _pip(host: Path, cpath: str, is_dir: bool) -> Pkg | None:
+    if is_dir:
         meta = host / ("METADATA" if host.name.endswith(".dist-info") else "PKG-INFO")
     else:
         meta = host
-    h = _headers(_read(meta))
+    h = _headers(_read_file(meta, _MAX_META))
     if not h.get("Name") or not h.get("Version"):
         log.debug("skipping unreadable pip metadata %s", host)
         return None
     url = None
     direct = host / "direct_url.json"
-    if host.is_dir() and direct.is_file():
-        try:
-            url = json.loads(_read(direct) or "{}").get("url")
-        except ValueError:
-            url = None
+    if is_dir and _is_regular(direct):
+        d = _json_dict(_read_file(direct, _MAX_META))
+        url = _str_or_none(d.get("url")) if d else None
     return Pkg("pip", h["Name"], h["Version"], _parent(cpath), cpath, url)
 
 
 def _r(host: Path, cpath: str) -> Pkg | None:
-    h = _headers(_read(host / "DESCRIPTION"))
+    h = _headers(_read_file(host / "DESCRIPTION", _MAX_META))
     if not h.get("Package") or not h.get("Version"):
         log.debug("skipping unreadable R DESCRIPTION in %s", host)
         return None
@@ -144,14 +182,13 @@ def _r(host: Path, cpath: str) -> Pkg | None:
 
 
 def _conda(host: Path, cpath: str) -> Pkg | None:
-    try:
-        d = json.loads(_read(host) or "")
-    except ValueError:
+    d = _json_dict(_read_file(host, _MAX_META))
+    if d is None:
         log.debug("skipping unreadable conda metadata %s", host)
         return None
-    if not isinstance(d, dict) or not d.get("name") or not d.get("version"):
+    if not d.get("name") or not d.get("version"):
         return None
-    return Pkg("conda", str(d["name"]), str(d["version"]), _parent(_parent(cpath)), cpath, d.get("url"))
+    return Pkg("conda", str(d["name"]), str(d["version"]), _parent(_parent(cpath)), cpath, _str_or_none(d.get("url")))
 
 
 def parse_dpkg_status(text: str) -> list[Pkg]:
@@ -171,16 +208,16 @@ def _classify(host: Path, cpath: str, is_dir: bool) -> list[Pkg] | None:
     """Packages described by this entry, [] for unreadable metadata, None if it is not metadata."""
     p = PurePosixPath(cpath)
     if p.parent.name in PIP_PARENTS and (p.name.endswith(".dist-info") or p.name.endswith(".egg-info")):
-        pkg = _pip(host, cpath)
+        pkg = _pip(host, cpath, is_dir)
         return [pkg] if pkg else []
-    if is_dir and (host / "DESCRIPTION").is_file() and (host / "Meta" / "package.rds").is_file():
+    if is_dir and _is_regular(host / "DESCRIPTION") and _is_regular(host / "Meta" / "package.rds"):
         pkg = _r(host, cpath)
         return [pkg] if pkg else []
     if not is_dir and p.parent.name == "conda-meta" and p.name.endswith(".json"):
         pkg = _conda(host, cpath)
         return [pkg] if pkg else []
     if not is_dir and cpath == DPKG_STATUS:
-        return parse_dpkg_status(_read_large(host) or "")
+        return parse_dpkg_status(_read_file(host, _MAX_DPKG) or "")
     return None
 
 

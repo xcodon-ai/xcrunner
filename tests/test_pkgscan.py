@@ -296,3 +296,111 @@ def test_ns_upper_entry_replaces_base(tmp_path):
 
     got = {(c["name"], c["version"], c["change"]) for c in changes(base, ns_layer_packages(upper, base))}
     assert got == {("foo", "0.9", "changed")}, f"Expected foo 0.9 changed, got {got}"
+
+
+# -- Final review: untrusted files in a layer -----------------------------------
+
+
+def _bounded(fn, timeout: float = 5.0):
+    """Run fn in a thread; fail (instead of hanging the suite) when it does not return in time."""
+    import threading
+
+    out: dict = {}
+
+    def run():
+        try:
+            out["result"] = fn()
+        except BaseException as e:  # noqa: BLE001 - re-raised below
+            out["error"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    assert not t.is_alive(), "the scan hung"
+    if "error" in out:
+        raise out["error"]
+    return out["result"]
+
+
+def _release(fifos: list[Path]) -> None:
+    """Open each FIFO for writing once, so a reader stuck on it (before the fix) sees EOF."""
+    for f in fifos:
+        try:
+            os.close(os.open(f, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+
+
+def test_a_fifo_at_a_metadata_path_is_skipped_and_never_blocks(tmp_path):
+    root = tmp_path / "rootfs"
+    pip_pkg(root, "ok", "1.0")
+    fifos = [root / SP / "f-1.0.dist-info" / "METADATA", root / SP / "g-1.0.egg-info",
+             root / "opt/conda/conda-meta/x-1.json", root / "var/lib/dpkg/status",
+             root / SP / "h-1.0.dist-info" / "direct_url.json"]
+    put(root, f"{SP}/h-1.0.dist-info/METADATA", "Name: h\nVersion: 1.0\n")
+    for f in fifos:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(f)
+    try:
+        for scan in (lambda: scan_tree(root), lambda: ns_layer_packages(root, [])):
+            pkgs = _bounded(scan)
+            assert sorted((p.name, p.url) for p in pkgs) == [("h", None), ("ok", None)]
+    finally:
+        _release(fifos)
+
+
+def test_symlinked_metadata_never_reads_host_files(tmp_path):
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "meta.txt").write_text("Name: SECRET-meta\nVersion: 6.6.6\n")
+    (host / "desc.txt").write_text("Package: SECRET-desc\nVersion: 6.6.6\nRepository: SECRET-repo\n")
+    (host / "direct.json").write_text(json.dumps({"url": "https://SECRET-url"}))
+    (host / "conda.json").write_text(json.dumps({"name": "SECRET-conda", "version": "6"}))
+    (host / "status").write_text("Package: SECRET-dpkg\nStatus: install ok installed\nVersion: 6\n")
+    root = tmp_path / "rootfs"
+    lib = "usr/local/lib/R/site-library"
+
+    def link(rel: str, target: Path) -> None:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.symlink_to(target)
+
+    link(f"{SP}/evil-1.0.dist-info/METADATA", host / "meta.txt")
+    pip_pkg(root, "good", "1.0")
+    link(f"{SP}/good-1.0.dist-info/direct_url.json", host / "direct.json")
+    link(f"{SP}/eggy-1.0.egg-info", host / "meta.txt")
+    link(f"{lib}/rpkg/DESCRIPTION", host / "desc.txt")
+    put(root, f"{lib}/rpkg/Meta/package.rds", "x")
+    put(root, f"{lib}/rpkg2/DESCRIPTION", "Package: rpkg2\nVersion: 1\n")
+    link(f"{lib}/rpkg2/Meta/package.rds", host / "desc.txt")
+    link("opt/conda/conda-meta/s-1.json", host / "conda.json")
+    link("var/lib/dpkg/status", host / "status")
+    for scan in (lambda: scan_tree(root), lambda: ns_layer_packages(root, [])):
+        pkgs = scan()
+        assert "SECRET" not in repr(pkgs)
+        assert [(p.name, p.url) for p in pkgs] == [("good", None)]
+
+
+def test_untrusted_json_shapes_are_skipped(tmp_path):
+    root = tmp_path / "rootfs"
+    pip_pkg(root, "p", "1")
+    put(root, f"{SP}/p-1.dist-info/direct_url.json", "[1]")
+    pip_pkg(root, "q", "1")
+    put(root, f"{SP}/q-1.dist-info/direct_url.json", json.dumps({"url": {"not": "a string"}}))
+    put(root, "opt/conda/conda-meta/deep-1.json", "[" * 100000)
+    put(root, "opt/conda/conda-meta/list-1.json", "[1]")
+    put(root, "opt/conda/conda-meta/ok-1.json", json.dumps({"name": "ok", "version": "1", "url": 5}))
+    for scan in (lambda: scan_tree(root), lambda: ns_layer_packages(root, [])):
+        assert [(p.manager, p.name, p.url) for p in scan()] == [
+            ("conda", "ok", None), ("pip", "p", None), ("pip", "q", None)]
+
+
+def test_read_file_caps_and_rejects_non_regular_files(tmp_path):
+    f = tmp_path / "f"
+    f.write_bytes(b"\xef\xbb\xbfabcdef")
+    assert pkgscan._read_file(f, 4) == "a"  # the cap counts bytes read, BOM included
+    assert pkgscan._read_file(f, 100) == "abcdef"
+    (tmp_path / "l").symlink_to(f)
+    assert pkgscan._read_file(tmp_path / "l", 100) is None
+    assert pkgscan._read_file(tmp_path, 100) is None
+    assert pkgscan._read_file(tmp_path / "missing", 100) is None
