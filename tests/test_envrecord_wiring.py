@@ -141,3 +141,24 @@ def test_a_built_image_lists_its_built_in_packages(home, pyimage, engine_name, p
     assert "built-in package changes:" in text and "built  added 1.0" in text and "Dockerfile on record" in text
     assert f"built from {pyimage.id[:12]}" in text and "platform linux/amd64; packages: pip 3" in text
 
+
+def test_cli_env_errors_exit_125_without_a_traceback(home, project, tmp_path, capfd):
+    missing = tmp_path / "no-such" / ".xrunner-env"
+    assert cli.main(["env", "record", "--env-dir", str(missing)]) == 125
+    err = capfd.readouterr().err
+    assert "Traceback" not in err and str(missing) in err
+    env_dir = project / ".xrunner-env"
+    (env_dir / "environment.json").mkdir()  # a directory where the file should be
+    assert cli.main(["env", "show", "--json", "--env-dir", str(env_dir)]) == 125
+    assert "Traceback" not in capfd.readouterr().err
+
+
+def test_cli_env_show_json_prints_the_file_itself(home, project, capfd):
+    env_dir = project / ".xrunner-env"
+    assert cli.main(["env", "show", "--json", "--env-dir", str(env_dir)]) == 0
+    assert json.loads(capfd.readouterr().out) == envrecord.empty()
+    raw = '{"version": 1, "images": {}, "layers": {"ab": 1}, "conda": {}, "extra": [1,2]}\n'
+    (env_dir / "environment.json").write_text(raw)
+    assert cli.main(["env", "show", "--json", "--env-dir", str(env_dir)]) == 0
+    assert capfd.readouterr().out == raw
+    assert cli.main(["env", "show", "--env-dir", str(env_dir)]) == 0  # non-dict layer entry: no crash

@@ -519,16 +519,43 @@ def _env_folder(args) -> Path:
     return found
 
 
+def _print_record_file(env_dir: Path) -> None:
+    """`env show --json`: the record file's own bytes (spec 13.7), or the empty record when there is none."""
+    from xcodon_runtime import envrecord
+    from xcodon_runtime.pkgscan import read_bytes
+
+    path = env_dir / envrecord.RECORD_NAME
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        print(json.dumps(envrecord.load(env_dir), indent=2, sort_keys=True))
+        return
+    data = read_bytes(path, envrecord.MAX_RECORD)
+    if data is None:
+        raise XcodonError(f"cannot read the environment record {path}: it is not a readable regular file")
+    sys.stdout.flush()
+    out = getattr(sys.stdout, "buffer", None)
+    if out is None:
+        sys.stdout.write(data.decode("utf-8", errors="replace"))
+    else:
+        out.write(data)
+        out.flush()
+
+
 def cmd_env(rt: Runtime, args) -> int:
     from xcodon_runtime import envrecord
 
     env_dir = _env_folder(args)
-    if args.env_cmd == "record":
-        print(envrecord.record_all(env_dir, rt.images))
-    elif args.json:
-        print(json.dumps(envrecord.load(env_dir), indent=2, sort_keys=True))
-    else:
-        print(envrecord.show(env_dir), end="")
+    try:
+        if args.env_cmd == "record":
+            print(envrecord.record_all(env_dir, rt.images))
+        elif args.json:
+            _print_record_file(env_dir)
+        else:
+            print(envrecord.show(env_dir), end="")
+    except OSError as e:
+        verb = "record" if args.env_cmd == "record" else "show"
+        raise XcodonError(f"cannot {verb} the environment record in {env_dir}: {e.strerror or e}") from e
     return 0
 
 
