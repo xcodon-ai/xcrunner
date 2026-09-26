@@ -7,11 +7,12 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence, TextIO
 
-from xcodon_runtime.condaroot import ensure_root, lookup_root, opt_value, resolve_root
+from xcodon_runtime.condaroot import abs_prefix, ensure_root, lookup_root, opt_value, resolve_root, split_option
 from xcodon_runtime.home import RuntimeHome
 from xcodon_runtime.micromamba import find_micromamba
 
@@ -34,7 +35,11 @@ _DROP = frozenset({"CONDARC", "MAMBARC", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "C
 # A combined short-flag token (`-yq`) sets `yes` when it has a `y` and none of these
 # option letters, which take a value and so must not be read as bare boolean flags.
 _SHORT_COMBO_RE = re.compile(r"^-[a-zA-Z]+$")
-_VALUE_LETTERS = frozenset("npcrf")
+_VALUE_LETTERS = "npcrf"
+_MUST_HAVE_VALUE = frozenset({"-r", "--root-prefix", "-n", "--name", "-p", "--prefix"})
+# `remove --all`/`-a` (and `uninstall`) empties the env; like `env remove`, it
+# leaves nothing to record, and a record left from before would be stale.
+REMOVE_ALL_VERBS = frozenset({"remove", "uninstall"})
 CONFIG_NOT_SUPPORTED = (
     "conda: xrunner's conda only supports `config list`; channels default to conda-forge "
     "and bioconda, and -c adds more per command. Config changes are not supported.\n"
@@ -53,7 +58,7 @@ ACTIVATE_MSG = ("conda {verb}: activation changes the calling shell, which xrunn
 # Options micromamba accepts ahead of the verb (spec 12.5: `conda -r ROOT run ...`,
 # `conda -q run ...`) that take a separate value, so the pre-verb scan below can
 # skip past it without mistaking it for the verb.
-_PRE_VERB_VALUE_OPTS = ("-r", "--root-prefix", "--rc-file")
+_PRE_VERB_VALUE_OPTS = ("-r", "--root-prefix")
 
 
 def _split_before_run(argv: Sequence[str]) -> tuple[list[str], list[str]] | None:
@@ -72,7 +77,7 @@ def _split_before_run(argv: Sequence[str]) -> tuple[list[str], list[str]] | None
         tok = tokens[i]
         if not tok.startswith("-"):
             return (before, tokens[i + 1:]) if tok == "run" else None
-        opt = tok.split("=", 1)[0] if tok.startswith("--") else (tok[:2] if len(tok) > 1 else tok)
+        opt, _ = split_option(tok, "r")
         if opt in _PRE_VERB_VALUE_OPTS:
             j = i
             _, i = opt_value(tokens, i)
@@ -97,13 +102,27 @@ class Parsed:
     override_channels: bool = False
     help: bool = False
     version: bool = False
+    remove_all: bool = False
+    missing_value: str | None = None  # the first -r/-n/-p given without a value
 
     @property
     def key(self) -> str:
         return f"{self.verb} {self.sub}" if self.sub else (self.verb or "")
 
 
-def parse_args(argv: Sequence[str]) -> Parsed:
+def _with_abs_prefix(tokens: list[str], value: str) -> list[str]:
+    """The -p/--prefix tokens ``tokens``, in whichever form they were given, with
+    ``value`` (the absolute path) in place of the value they carried."""
+    if len(tokens) == 2:
+        return [tokens[0], value]
+    opt, _ = split_option(tokens[0], "p")
+    return [f"{opt}={value}" if opt.startswith("--") else opt + value]
+
+
+def parse_args(argv: Sequence[str], cwd: Path | None = None) -> Parsed:
+    """Read conda's command line. With ``cwd``, a relative -p/--prefix value is
+    made absolute from it, in p.prefix and in the tokens micromamba gets
+    (spec 12.3): micromamba 2.9.0 would read one with no `/` as an env name."""
     p = Parsed()
     tokens = list(argv)
     i = 0
@@ -111,12 +130,7 @@ def parse_args(argv: Sequence[str]) -> Parsed:
         tok = tokens[i]
         # A long option's name stops at `=`; a short option's is just its two characters
         # (`-cbioconda`, `-r=/x`), so its own attached value is not mistaken for the flag.
-        if tok.startswith("--"):
-            opt = tok.split("=", 1)[0]
-        elif tok.startswith("-") and len(tok) > 1:
-            opt = tok[:2]
-        else:
-            opt = tok
+        opt, _ = split_option(tok, _VALUE_LETTERS)
         if p.verb is None and not tok.startswith("-"):
             p.verb = tok
             i += 1
@@ -126,10 +140,18 @@ def parse_args(argv: Sequence[str]) -> Parsed:
             continue
         if opt in ("-r", "--root-prefix"):
             p.root_flag, i = opt_value(tokens, i)
+            if p.root_flag is None and p.missing_value is None:
+                p.missing_value = opt
             continue
         if opt in ("-n", "--name", "-p", "--prefix", "-c", "--channel", "-f", "--file"):
             value, j = opt_value(tokens, i)
-            p.tokens.extend(tokens[i:j])
+            if value is None and opt in _MUST_HAVE_VALUE and p.missing_value is None:
+                p.missing_value = opt
+            if value and cwd is not None and opt in ("-p", "--prefix"):
+                value = str(abs_prefix(value, cwd))
+                p.tokens.extend(_with_abs_prefix(tokens[i:j], value))
+            else:
+                p.tokens.extend(tokens[i:j])
             if opt in ("-n", "--name"):
                 p.name = value
             elif opt in ("-p", "--prefix"):
@@ -148,9 +170,13 @@ def parse_args(argv: Sequence[str]) -> Parsed:
             p.help = True
         elif tok in ("-V", "--version") and p.verb is None:
             p.version = True
-        elif len(tok) > 2 and _SHORT_COMBO_RE.match(tok) and not (_VALUE_LETTERS & set(tok[1:])):
+        elif tok in ("-a", "--all"):
+            p.remove_all = True
+        elif len(tok) > 2 and _SHORT_COMBO_RE.match(tok) and not (set(_VALUE_LETTERS) & set(tok[1:])):
             if "y" in tok[1:]:
                 p.yes = True
+            if "a" in tok[1:]:
+                p.remove_all = True
         p.tokens.append(tok)
         i += 1
     return p
@@ -211,8 +237,7 @@ def _env_file_name(path: str, cwd: Path) -> str | None:
 
 def target_prefix(p: Parsed, root: Path, cwd: Path) -> Path:
     if p.prefix:
-        pp = Path(p.prefix)
-        return pp if pp.is_absolute() else cwd / pp
+        return abs_prefix(p.prefix, cwd)
     if p.name and p.name != "base":
         return root / "envs" / p.name
     if p.key == "env create" and p.file:
@@ -232,11 +257,34 @@ def _write_record(mm: Path, prefix: Path, root: Path, env: dict[str, str], cwd: 
         print(f"xrunner: warning: could not record the packages of {prefix}: {r.stderr.strip()[:200]}", file=err)
         return
     try:
-        tmp = prefix / (EXPLICIT_NAME + ".tmp")
-        tmp.write_text(r.stdout)
-        os.replace(tmp, prefix / EXPLICIT_NAME)
+        fd, tmp = tempfile.mkstemp(dir=prefix, prefix=".conda-explicit-")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(r.stdout)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, prefix / EXPLICIT_NAME)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except OSError as e:
         print(f"xrunner: warning: could not record the packages of {prefix}: {e}", file=err)
+
+
+def _drop_record(prefix: Path, err: TextIO) -> None:
+    """After `remove --all` or `env remove`: the env holds no packages, so any
+    record left in it would be stale."""
+    try:
+        (prefix / EXPLICIT_NAME).unlink(missing_ok=True)
+    except OSError as e:
+        print(f"xrunner: warning: could not remove {prefix / EXPLICIT_NAME}: {e}", file=err)
+
+
+def _warn_home_root(root: Path, err: TextIO) -> None:
+    print(f"xrunner: no project env folder found; using {root} "
+          "(set XRUNNER_ENV_DIR or create .xrunner-env in the project)", file=err)
 
 
 def _micromamba_version(mm: Path) -> str:
@@ -256,7 +304,10 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
 
         before, after = split
         return run_main(before + after, home, cwd, environ, err)
-    p = parse_args(argv)
+    p = parse_args(argv, cwd)
+    if p.missing_value is not None:
+        print(f"conda: {p.missing_value} needs a value", file=err)
+        return 2
     if p.version:
         print(f"conda {_micromamba_version(find_micromamba(home, environ))} (micromamba via xrunner)")
         return 0
@@ -274,7 +325,7 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
         root = resolve_root(cwd, environ, home, p.root_flag)
         ensure_root(root.path)
         if root.source == "home":
-            print(f"xrunner: no project env folder found; using {root.path}", file=err)
+            _warn_home_root(root.path, err)
         env = micromamba_env(root.path, home, environ)
         return subprocess.run([str(mm), "env"] + p.tokens, env=env, cwd=cwd).returncode
     if p.verb not in PASS_VERBS or (p.verb == "env" and p.sub not in ENV_SUBVERBS):
@@ -294,9 +345,13 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
         root = lookup_root(root, home, p.name)
     ensure_root(root.path)
     if root.source == "home":
-        print(f"xrunner: no project env folder found; using {root.path}", file=err)
+        _warn_home_root(root.path, err)
     env = micromamba_env(root.path, home, environ)
     code = subprocess.run(micromamba_argv(mm, p, root.path), env=env, cwd=cwd).returncode
-    if code == 0 and p.key in RECORD and not (DRY_RUN_FLAGS & set(p.tokens)):
+    if code != 0 or DRY_RUN_FLAGS & set(p.tokens):
+        return code
+    if p.key == "env remove" or (p.key in REMOVE_ALL_VERBS and p.remove_all):
+        _drop_record(target_prefix(p, root.path, cwd), err)
+    elif p.key in RECORD:
         _write_record(mm, target_prefix(p, root.path, cwd), root.path, env, cwd, err)
     return code

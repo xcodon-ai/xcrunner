@@ -17,6 +17,27 @@ if log:
     with open(log, "a") as f:
         f.write(json.dumps({"argv": args, "cwd": os.getcwd(),
                             "env": {k: os.environ.get(k) for k in keys}}) + "\n")
+
+
+def prefix_value(i, a):
+    """The -p/--prefix value at args[i] in any form (`-p X`, `-pX`, `--prefix=X`), else None."""
+    if a in ("-p", "--prefix"):
+        return args[i + 1]
+    if a.startswith("--prefix="):
+        return a[len("--prefix="):]
+    if a.startswith("-p") and len(a) > 2:
+        return a[2:]
+    return None
+
+
+def prefix_path(value):
+    # Real micromamba 2.9.0: a -p value with no `/` is an env name, `<root>/envs/NAME`
+    # ("'NAME' does not contain any filesystem separator"); anything else is a path.
+    if "/" not in value:
+        return os.path.join(os.environ["MAMBA_ROOT_PREFIX"], "envs", value)
+    return os.path.join(os.getcwd(), value)
+
+
 if "-d" in args:
     # Real micromamba 2.9.0 has no `-d` (only `--dry-run`) and rejects an unknown
     # option outright; a caller must translate conda's `-d` itself before this point.
@@ -36,8 +57,8 @@ if code == 0 and args and args[0] in ("create", "install"):
     root = os.environ["MAMBA_ROOT_PREFIX"]
     prefix = root
     for i, a in enumerate(args):
-        if a in ("-p", "--prefix"):
-            prefix = os.path.join(os.getcwd(), args[i + 1])
+        if prefix_value(i, a) is not None:
+            prefix = prefix_path(prefix_value(i, a))
         elif a in ("-n", "--name") and args[i + 1] != "base":
             prefix = os.path.join(root, "envs", args[i + 1])
     os.makedirs(os.path.join(prefix, "conda-meta"), exist_ok=True)
@@ -50,8 +71,8 @@ elif code == 0 and args[:2] == ["env", "create"]:
     prefix = None
     name = None
     for i, a in enumerate(args):
-        if a in ("-p", "--prefix"):
-            prefix = os.path.join(os.getcwd(), args[i + 1])
+        if prefix_value(i, a) is not None:
+            prefix = prefix_path(prefix_value(i, a))
         elif a in ("-n", "--name") and args[i + 1] != "base":
             name = args[i + 1]
         elif a in ("-f", "--file") and name is None:

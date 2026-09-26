@@ -22,6 +22,7 @@ def test_conda_shim_end_to_end(tmp_path):
     empty.mkdir()
     project = tmp_path / "project"
     (project / ".xrunner-env").mkdir(parents=True)
+    (project / ".xrunner-env").chmod(0o755)
     xrunner = Path(sys.executable).with_name("xrunner")
     env = {"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(user_home), "XCODON_RUNTIME_HOME": str(home)}
 

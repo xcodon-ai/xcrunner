@@ -35,6 +35,8 @@ def project(tmp_path, home):
     proj = tmp_path / "proj"
     (proj / "workspace").mkdir(parents=True)
     make_env(proj / ".xrunner-env" / "conda" / "envs" / "tools", TOOLS)
+    # resolve_root skips a group- or world-writable .xrunner-env; do not depend on the umask.
+    (proj / ".xrunner-env").chmod(0o755)
     return proj
 
 
@@ -205,3 +207,42 @@ def test_broken_pipe_dies_quietly_instead_of_printing_an_error(project, env):
     assert r.stdout == "y\n"
     assert r.returncode == 0
     assert "Broken pipe" not in r.stderr
+
+
+# -- final review ----------------------------------------------------------------------
+
+
+def test_relative_prefix_without_a_slash_is_a_folder_in_cwd(project, env):
+    make_env(project / "myenv", {"hello": 'echo "hi from $CONDA_PREFIX"'})
+    r = _xr(["conda", "run", "-p", "myenv", "hello"], project, env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == f"hi from {project / 'myenv'}\n"
+
+
+def test_activate_d_scripts_are_sourced_with_bash(project, env):
+    """Real conda on Linux sources activate.d with bash, and packages rely on it;
+    /bin/sh (dash on Debian and Ubuntu) rejects bash-only syntax such as arrays."""
+    d = project / ".xrunner-env" / "conda" / "envs" / "tools" / "etc" / "conda" / "activate.d"
+    d.mkdir(parents=True)
+    (d / "arr.sh").write_text("arr=(a b)\nexport FROM_BASH=${arr[1]}\n")
+    r = _xr(["conda", "run", "-n", "tools", "sh", "-c", "echo $FROM_BASH"], project, env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "b\n"
+
+
+def test_exec_argv_shape_and_sh_fallback(monkeypatch, tmp_path):
+    from xcodon_runtime import condarun
+
+    s = tmp_path / "a b.sh"
+    script = f". '{s}'; " + 'exec "$@"'
+    assert condarun.exec_argv([], ["tool", "x"]) == ["tool", "x"]
+    assert condarun.exec_argv([s], ["tool", "x"]) == ["/bin/bash", "-c", script, "bash", "tool", "x"]
+    monkeypatch.setattr(condarun.os, "access", lambda p, m: False)
+    assert condarun.exec_argv([s], ["tool"]) == ["/bin/sh", "-c", script, "sh", "tool"]
+
+
+def test_parse_run_args_does_not_take_an_option_as_a_value():
+    with pytest.raises(RunUsageError, match="-n needs a value"):
+        parse_run_args(["-n", "-p", "x", "tool"])
+    with pytest.raises(RunUsageError, match="-r needs a value"):
+        parse_run_args(["-r", "-n", "c", "tool"])

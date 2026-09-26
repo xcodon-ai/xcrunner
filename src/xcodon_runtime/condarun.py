@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence, TextIO
 
-from xcodon_runtime.condaroot import ensure_root, lookup_root, opt_value, resolve_root
+from xcodon_runtime.condaroot import abs_prefix, ensure_root, lookup_root, opt_value, resolve_root, split_option
 from xcodon_runtime.home import RuntimeHome
 
 _VALUE_OPTS = ("-n", "--name", "-p", "--prefix", "-r", "--root-prefix", "--cwd")
@@ -59,12 +59,7 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
         # A long option's name stops at `=`; a short option's is just its two
         # characters (`-ntools`, `-n=foo`), so its own attached value is not
         # mistaken for the flag -- the same reading condashim.parse_args uses.
-        if tok.startswith("--"):
-            opt = tok.split("=", 1)[0]
-        elif tok.startswith("-") and len(tok) > 2 and tok[:2] in ("-n", "-p", "-r"):
-            opt = tok[:2]
-        else:
-            opt = tok
+        opt, _ = split_option(tok, "npr")
         if opt in _VALUE_OPTS:
             value, i = opt_value(tokens, i)
             if value is None:
@@ -108,6 +103,24 @@ def activation_env(prefix: Path, label: str, environ: Mapping[str, str]) -> dict
     return env
 
 
+def activation_shell() -> str:
+    """The shell that sources activate.d scripts: bash, as real conda on Linux
+    uses (the scripts may rely on bash syntax), else /bin/sh."""
+    if os.path.isfile("/bin/bash") and os.access("/bin/bash", os.X_OK):
+        return "/bin/bash"
+    return "/bin/sh"
+
+
+def exec_argv(scripts: Sequence[Path], command: Sequence[str]) -> list[str]:
+    """The argv to exec: the command itself, or, when the env has activate.d
+    scripts, a shell that sources them and then execs the command."""
+    if not scripts:
+        return list(command)
+    shell = activation_shell()
+    sources = "; ".join(f". {shlex.quote(str(s))}" for s in scripts)
+    return [shell, "-c", f'{sources}; exec "$@"', os.path.basename(shell), *command]
+
+
 def run_main(argv: Sequence[str], home: RuntimeHome, cwd: Path, environ: Mapping[str, str],
              err: TextIO) -> int:
     try:
@@ -123,7 +136,7 @@ def run_main(argv: Sequence[str], home: RuntimeHome, cwd: Path, environ: Mapping
         return 2
     root = resolve_root(cwd, environ, home, a.root_flag)
     if a.prefix:
-        prefix = Path(a.prefix) if Path(a.prefix).is_absolute() else cwd / a.prefix
+        prefix = abs_prefix(a.prefix, cwd)
         label = str(prefix)
     elif a.name and a.name != "base":
         root = lookup_root(root, home, a.name)
@@ -141,12 +154,7 @@ def run_main(argv: Sequence[str], home: RuntimeHome, cwd: Path, environ: Mapping
         return 1
     env = activation_env(prefix, label, environ)
     workdir = cwd if a.cwd is None else (Path(a.cwd) if Path(a.cwd).is_absolute() else cwd / a.cwd)
-    scripts = sorted((prefix / "etc" / "conda" / "activate.d").glob("*.sh"))
-    if scripts:
-        sources = "; ".join(f". {shlex.quote(str(s))}" for s in scripts)
-        argv_exec = ["/bin/sh", "-c", f'{sources}; exec "$@"', "sh", *a.command]
-    else:
-        argv_exec = list(a.command)
+    argv_exec = exec_argv(sorted((prefix / "etc" / "conda" / "activate.d").glob("*.sh")), a.command)
     try:
         os.chdir(workdir)
     except OSError as e:

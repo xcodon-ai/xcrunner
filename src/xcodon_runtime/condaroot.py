@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -22,20 +23,55 @@ class Root:
     source: str  # "flag", "env", "project", "home", or "lookup" (an existing env found in the home root)
 
 
-def opt_value(tokens: list[str], i: int) -> tuple[str | None, int]:
-    """The value of the option at tokens[i], the way argparse (and so conda) reads it:
-    `--opt=value` or `--opt value` for a long option; for a short option, whatever is
-    attached to the same token right after the option letter (`-nfoo` is `foo`, `-n=foo`
-    is `=foo` -- the `=` is not special for a short option), else the next token."""
-    tok = tokens[i]
+def split_option(tok: str, short_value_letters: str) -> tuple[str, str | None]:
+    """An option token's name and the value attached to it, or None when none is.
+
+    A long option's name stops at `=` (`--name=foo` is `--name`, `foo`). A short
+    option whose letter is in ``short_value_letters`` takes the rest of the token
+    as its value (`-nfoo` is `-n`, `foo`; `-n=foo` is `-n`, `=foo`, as argparse
+    reads it). Any other token, such as combined flags (`-yq`), is its own name."""
     if tok.startswith("--"):
-        if "=" in tok:
-            return tok.split("=", 1)[1], i + 1
-    elif len(tok) > 2:
-        return tok[2:], i + 1
+        name, sep, value = tok.partition("=")
+        return (name, value) if sep else (tok, None)
+    if len(tok) > 2 and tok[0] == "-" and tok[1] in short_value_letters:
+        return tok[:2], tok[2:]
+    return tok, None
+
+
+def opt_value(tokens: list[str], i: int) -> tuple[str | None, int]:
+    """The value of the value-taking option at tokens[i] and the index after it,
+    the way argparse (and so conda) reads it: attached to the token (see
+    split_option), else the next token. The next token is not taken when it is
+    itself an option (`-r -n c`): then the value is None."""
+    tok = tokens[i]
+    _, attached = split_option(tok, tok[1:2])
+    if attached is not None:
+        return attached, i + 1
     if i + 1 < len(tokens):
-        return tokens[i + 1], i + 2
+        nxt = tokens[i + 1]
+        if nxt.startswith("-") and len(nxt) > 1:
+            return None, i + 1
+        return nxt, i + 2
     return None, i + 1
+
+
+def abs_prefix(value: str, cwd: Path) -> Path:
+    """A `-p/--prefix` value as an absolute path: a relative one is taken from cwd.
+    micromamba 2.9.0 reads a relative value with no `/` as an env name
+    (`<root>/envs/NAME`), so xrunner always hands it this absolute path."""
+    p = Path(value)
+    return p if p.is_absolute() else cwd / p
+
+
+def _trusted_env_folder(d: Path) -> bool:
+    """A found `.xrunner-env` is used only when its resolved directory is ours
+    and no one else can write to it. In a shared parent such as /tmp, another
+    user's folder would otherwise make `conda run` exec their binaries."""
+    try:
+        st = os.stat(d)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not (st.st_mode & 0o022)
 
 
 def resolve_root(cwd: Path, environ: Mapping[str, str], home: RuntimeHome,
@@ -47,7 +83,7 @@ def resolve_root(cwd: Path, environ: Mapping[str, str], home: RuntimeHome,
     if env_dir:
         return Root(Path(env_dir) / ROOT_DIRNAME, "env")
     for d in (cwd, *cwd.parents):
-        if (d / ENV_FOLDER_NAME).is_dir():
+        if _trusted_env_folder(d / ENV_FOLDER_NAME):
             return Root(d / ENV_FOLDER_NAME / ROOT_DIRNAME, "project")
     return Root(home.path / ROOT_DIRNAME, "home")
 
@@ -63,11 +99,10 @@ def lookup_root(root: Root, home: RuntimeHome, name: str) -> Root:
 
 
 def ensure_root(root: Path) -> None:
-    try:
-        (root / ".home").mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise XcodonError(f"cannot create the conda root prefix {root}: {e}") from e
-    os.makedirs(root / "envs", exist_ok=True)
     # A fresh root is a base env too, as in real conda: without conda-meta here,
     # a bare `conda list` (which targets the root itself) fails to find an environment.
-    os.makedirs(root / "conda-meta", exist_ok=True)
+    try:
+        for d in (root / ".home", root / "envs", root / "conda-meta"):
+            os.makedirs(d, mode=0o755, exist_ok=True)
+    except OSError as e:
+        raise XcodonError(f"cannot create the conda root prefix {root}: {e}") from e

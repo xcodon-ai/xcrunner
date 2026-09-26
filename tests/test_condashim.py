@@ -1,11 +1,15 @@
 import io
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from tests.fake_micromamba import make_fake_micromamba, read_log
 from xcodon_runtime import cli
-from xcodon_runtime.condaroot import ensure_root, lookup_root, opt_value, resolve_root
+from xcodon_runtime import condaroot
+from xcodon_runtime.condaroot import ensure_root, lookup_root, opt_value, resolve_root, split_option
 from xcodon_runtime.condashim import _split_before_run, conda_main, parse_args
 from xcodon_runtime.micromamba import MicromambaMissing
 
@@ -25,6 +29,8 @@ def _env(fake, **extra):
 def project(tmp_path):
     proj = tmp_path / "proj"
     (proj / ".xrunner-env").mkdir(parents=True)
+    # resolve_root skips a group- or world-writable .xrunner-env; do not depend on the umask.
+    (proj / ".xrunner-env").chmod(0o755)
     (proj / "workspace").mkdir()
     return proj
 
@@ -119,7 +125,8 @@ def test_override_channels_adds_no_defaults(home, project, fake):
     root = project / ".xrunner-env" / "conda"
     argv = ["create", "-p", "workspace/env", "--override-channels", "-c", "bioconda", "bwa"]
     assert conda_main(argv, home, cwd=project, environ=_env(fake), err=io.StringIO()) == 0
-    assert read_log(fake[1])[0]["argv"] == argv + ["--no-rc", "-r", str(root), "-y"]
+    sent = ["create", "-p", str(project / "workspace" / "env"), "--override-channels", "-c", "bioconda", "bwa"]
+    assert read_log(fake[1])[0]["argv"] == sent + ["--no-rc", "-r", str(root), "-y"]
     assert (project / "workspace" / "env" / "conda-explicit.txt").exists()
 
 
@@ -167,7 +174,8 @@ def test_home_fallback_warns_once(home, tmp_path, fake):
     lonely.mkdir()
     err = io.StringIO()
     assert conda_main(["create", "-n", "a", "x"], home, cwd=lonely, environ=_env(fake), err=err) == 0
-    assert err.getvalue() == f"xrunner: no project env folder found; using {home.path / 'conda'}\n"
+    assert err.getvalue() == (f"xrunner: no project env folder found; using {home.path / 'conda'} "
+                              "(set XRUNNER_ENV_DIR or create .xrunner-env in the project)\n")
     assert (home.path / "conda" / "envs" / "a" / "conda-meta").is_dir()
 
 
@@ -447,3 +455,197 @@ def test_cli_conda_home_flag_is_not_swallowed_by_xrunners_own_home_flag(home, fa
     monkeypatch.setenv("FAKE_MM_LOG", str(fake[1]))
     assert cli.main(["conda", "--home", "Z", "list"]) == 2
     assert read_log(fake[1]) == []
+
+
+# -- final review ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("form", [["-p", "myenv"], ["-pmyenv"], ["--prefix=myenv"], ["--prefix", "myenv"]])
+def test_relative_prefix_without_a_slash_is_a_folder_in_cwd(home, project, fake, form):
+    """micromamba 2.9.0 reads a -p value with no `/` as an env name, `<root>/envs/NAME`
+    (the fake now does too); xrunner hands it the absolute `<cwd>/NAME` instead, so the
+    env, the record and `conda run -p NAME` all agree on one folder."""
+    root = project / ".xrunner-env" / "conda"
+    err = io.StringIO()
+    assert conda_main(["create", *form, "x"], home, cwd=project, environ=_env(fake), err=err) == 0
+    target = project / "myenv"
+    argv = read_log(fake[1])[0]["argv"]
+    assert str(target) in "".join(argv) and "myenv" not in [a for a in argv if not a.startswith(("-", "/"))]
+    assert (target / "conda-explicit.txt").read_text().startswith("@EXPLICIT")
+    assert not (root / "envs" / "myenv").exists()
+    assert err.getvalue() == ""
+
+
+def test_prefix_is_made_absolute_in_every_form(home, project, fake):
+    target = str(project / "myenv")
+    for form, sent in ((["-p", "myenv"], ["-p", target]), (["-pmyenv"], ["-p" + target]),
+                       (["--prefix=myenv"], ["--prefix=" + target]), (["--prefix", "myenv"], ["--prefix", target]),
+                       (["-p", "/abs/e"], ["-p", "/abs/e"])):
+        p = parse_args(["list", *form], cwd=project)
+        assert p.tokens == sent and p.prefix == sent[-1].split("=")[-1].removeprefix("-p")
+
+
+def test_env_create_prefix_without_a_slash_is_a_folder_in_cwd(home, project, fake, tmp_path):
+    envfile = tmp_path / "env.yml"
+    envfile.write_text("name: fromyml\n")
+    err = io.StringIO()
+    assert conda_main(["env", "create", "-p", "myenv", "-f", str(envfile)], home, cwd=project,
+                      environ=_env(fake), err=err) == 0
+    argv = read_log(fake[1])[0]["argv"]
+    assert argv[argv.index("-p") + 1] == str(project / "myenv")
+    assert (project / "myenv" / "conda-explicit.txt").exists()
+    assert err.getvalue() == ""
+
+
+def test_create_then_run_with_a_relative_prefix_without_a_slash(home, project, fake):
+    env = {**_env(fake), "XCODON_RUNTIME_HOME": str(home.path)}
+    xr = [sys.executable, "-m", "xcodon_runtime.cli", "conda"]
+    r = subprocess.run(xr + ["create", "-p", "myenv", "x"], cwd=project, env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and "warning" not in r.stderr, r.stderr
+    r = subprocess.run(xr + ["run", "-p", "myenv", "sh", "-c", 'echo "$CONDA_PREFIX"'], cwd=project, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == f"{project / 'myenv'}\n"
+
+
+def _mode(path: Path) -> int:
+    return os.stat(path).st_mode & 0o777
+
+
+def test_upward_search_skips_a_world_writable_env_folder(home, tmp_path):
+    shared = tmp_path / "shared"
+    (shared / ".xrunner-env").mkdir(parents=True)
+    (shared / ".xrunner-env").chmod(0o777)
+    work = shared / "work"
+    work.mkdir()
+    r = resolve_root(work, {}, home)
+    assert (r.path, r.source) == (home.path / "conda", "home")
+    (shared / ".xrunner-env").chmod(0o775)
+    assert resolve_root(work, {}, home).source == "home", "group-writable is skipped too"
+
+
+def test_upward_search_keeps_looking_past_an_untrusted_folder(home, tmp_path):
+    outer = tmp_path / "outer"
+    (outer / ".xrunner-env").mkdir(parents=True)
+    (outer / ".xrunner-env").chmod(0o755)
+    inner = outer / "inner"
+    (inner / ".xrunner-env").mkdir(parents=True)
+    (inner / ".xrunner-env").chmod(0o777)
+    r = resolve_root(inner, {}, home)
+    assert (r.path, r.source) == (outer / ".xrunner-env" / "conda", "project")
+
+
+def test_upward_search_accepts_a_link_to_a_folder_you_own(home, tmp_path):
+    real = tmp_path / "real-env"
+    real.mkdir()
+    real.chmod(0o755)
+    proj = tmp_path / "linked"
+    proj.mkdir()
+    (proj / ".xrunner-env").symlink_to(real)
+    r = resolve_root(proj, {}, home)
+    assert (r.path, r.source) == (proj / ".xrunner-env" / "conda", "project")
+
+
+def test_upward_search_skips_a_folder_another_user_owns(home, project, monkeypatch):
+    other_uid = os.getuid() + 1
+    monkeypatch.setattr(condaroot.os, "getuid", lambda: other_uid)
+    assert resolve_root(project, {}, home).source == "home"
+
+
+def test_env_dir_and_root_flag_stay_trusted(home, tmp_path):
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    loose.chmod(0o777)
+    assert resolve_root(tmp_path, {"XRUNNER_ENV_DIR": str(loose)}, home).path == loose / "conda"
+    assert resolve_root(tmp_path, {}, home, explicit=str(loose)).path == loose
+
+
+def test_ensure_root_dirs_are_not_group_or_world_writable(tmp_path):
+    old = os.umask(0o022)
+    try:
+        env_folder = tmp_path / "p" / ".xrunner-env"
+        ensure_root(env_folder / "conda")
+    finally:
+        os.umask(old)
+    for d in (env_folder, env_folder / "conda", env_folder / "conda" / ".home",
+              env_folder / "conda" / "envs", env_folder / "conda" / "conda-meta"):
+        assert not _mode(d) & 0o022, (d, oct(_mode(d)))
+    home_like = type("H", (), {"path": tmp_path / "h"})()
+    assert resolve_root(tmp_path / "p", {}, home_like).source == "project"
+
+
+def test_ensure_root_wraps_every_mkdir_error(tmp_path):
+    from xcodon_runtime.errors import XcodonError
+
+    root = tmp_path / "r"
+    (root / ".home").mkdir(parents=True)
+    (root / "envs").write_text("a file, not a folder")
+    with pytest.raises(XcodonError, match="cannot create the conda root prefix"):
+        ensure_root(root)
+
+
+def test_record_temp_file_name_is_unique(home, project, fake):
+    """The record used to go through a fixed `conda-explicit.txt.tmp`, so two installs
+    into one env could collide; a leftover of that name (here, a folder) broke it."""
+    prefix = project / ".xrunner-env" / "conda" / "envs" / "a"
+    (prefix / "conda-explicit.txt.tmp").mkdir(parents=True)
+    err = io.StringIO()
+    assert conda_main(["create", "-n", "a", "x"], home, cwd=project, environ=_env(fake), err=err) == 0
+    assert (prefix / "conda-explicit.txt").read_text().startswith("@EXPLICIT")
+    assert err.getvalue() == ""
+    assert not [p for p in prefix.iterdir() if p.name.startswith(".conda-explicit-")]
+
+
+@pytest.mark.parametrize("argv", [["remove", "-n", "b", "--all"], ["remove", "-n", "b", "-a"],
+                                  ["uninstall", "-n", "b", "--all"], ["remove", "-ya", "-n", "b"],
+                                  ["env", "remove", "-n", "b"]])
+def test_removing_a_whole_env_drops_its_record(home, project, fake, argv):
+    prefix = project / ".xrunner-env" / "conda" / "envs" / "b"
+    (prefix / "conda-meta").mkdir(parents=True)
+    (prefix / "conda-explicit.txt").write_text("@EXPLICIT\nold\n")
+    err = io.StringIO()
+    assert conda_main(argv, home, cwd=project, environ=_env(fake), err=err) == 0
+    assert not (prefix / "conda-explicit.txt").exists()
+    assert len(read_log(fake[1])) == 1, "no export after removing everything"
+    assert err.getvalue() == ""
+
+
+def test_removing_one_package_still_records(home, project, fake):
+    prefix = project / ".xrunner-env" / "conda" / "envs" / "b"
+    (prefix / "conda-meta").mkdir(parents=True)
+    assert conda_main(["remove", "-n", "b", "x"], home, cwd=project, environ=_env(fake), err=io.StringIO()) == 0
+    assert "seqtk" in (prefix / "conda-explicit.txt").read_text()
+
+
+def test_opt_value_does_not_take_an_option_as_a_value():
+    assert opt_value(["-r", "-n", "c"], 0) == (None, 1)
+    assert opt_value(["--name", "--json"], 0) == (None, 1)
+    assert opt_value(["-n", "-"], 0) == ("-", 2), "a lone `-` is a value"
+    assert opt_value(["-n-x"], 0) == ("-x", 1), "an attached value is always the value"
+
+
+@pytest.mark.parametrize("argv,opt", [(["list", "-r", "-n", "c"], "-r"), (["create", "-n"], "-n"),
+                                      (["create", "-p", "--json", "x"], "-p"), (["list", "--name"], "--name")])
+def test_a_missing_value_exits_2(home, project, fake, argv, opt):
+    err = io.StringIO()
+    assert conda_main(argv, home, cwd=project, environ=_env(fake), err=err) == 2
+    assert err.getvalue() == f"conda: {opt} needs a value\n"
+    assert read_log(fake[1]) == []
+    assert not (project / "-n").exists()
+
+
+def test_rc_file_is_not_a_pre_verb_option():
+    assert _split_before_run(["--rc-file", "x", "run", "tool"]) is None
+
+
+def test_split_option():
+    assert split_option("--name=foo", "n") == ("--name", "foo")
+    assert split_option("--name=", "n") == ("--name", "")
+    assert split_option("--name", "n") == ("--name", None)
+    assert split_option("-nfoo", "n") == ("-n", "foo")
+    assert split_option("-n=foo", "n") == ("-n", "=foo")
+    assert split_option("-n", "n") == ("-n", None)
+    assert split_option("-yq", "n") == ("-yq", None)
+    assert split_option("-nfoo", "p") == ("-nfoo", None)
+    assert split_option("tool", "n") == ("tool", None)
+    assert split_option("-", "n") == ("-", None)
