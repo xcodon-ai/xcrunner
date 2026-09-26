@@ -38,7 +38,11 @@ class MicromambaMissing(XcodonError):
 
 
 def pinned_path(home: RuntimeHome) -> Path:
-    return home.path / "bin" / f"micromamba-{MICROMAMBA_VERSION}"
+    """``<home>/bin/micromamba-<version>/micromamba``. The file itself is named
+    plain `micromamba` because micromamba names itself after its file in the
+    hints and errors it prints ("micromamba run -n ..."), and `micromamba` is
+    what the shim serves."""
+    return home.path / "bin" / f"micromamba-{MICROMAMBA_VERSION}" / "micromamba"
 
 
 def _sha256(path: Path) -> str:
@@ -79,8 +83,11 @@ def install_micromamba(home: RuntimeHome, source: Path | None = None,
         raise XcodonError(f"--micromamba {source} is not a file")
     if source is None and dest.is_file() and _sha256(dest) == MICROMAMBA_BINARY_SHA256:
         return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.parent.parent.mkdir(parents=True, exist_ok=True)
     with home.lock("micromamba"):
+        if dest.parent.exists() and not dest.parent.is_dir():
+            dest.parent.unlink()  # the binary itself, as an earlier layout stored it
+        dest.parent.mkdir(exist_ok=True)
         work = Path(tempfile.mkdtemp(prefix=".micromamba-", dir=dest.parent))
         try:
             binary = work / "micromamba"

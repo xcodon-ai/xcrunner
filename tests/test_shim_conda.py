@@ -33,7 +33,7 @@ def test_install_writes_three_forwarding_shims(home, tmp_path, fake_mm, empty_pa
         assert text.rstrip().endswith('conda "$@"') and "xrunner" in text
         assert os.access(p, os.X_OK) and is_xrunner_shim(p)
         assert f"installed {p}" in out
-    assert (home.path / "bin" / "micromamba-2.9.0").read_bytes() == fake_mm.read_bytes()
+    assert (home.path / "bin" / "micromamba-2.9.0" / "micromamba").read_bytes() == fake_mm.read_bytes()
     assert "add it to PATH" in out
     env = {"PATH": f"{shim_dir}:/usr/bin:/bin", "XCODON_RUNTIME_HOME": str(home.path), "HOME": str(tmp_path)}
     r = subprocess.run(["mamba", "--version"], env=env, capture_output=True, text=True, timeout=60)

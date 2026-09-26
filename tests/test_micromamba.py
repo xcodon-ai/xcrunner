@@ -48,13 +48,14 @@ def test_pinned_values_are_the_conda_forge_2_9_0_package():
 def test_install_downloads_verifies_and_extracts(home, pinned_fake):
     opener, calls = pinned_fake
     path = mm.install_micromamba(home, opener=opener)
-    assert path == home.path / "bin" / "micromamba-2.9.0" == mm.pinned_path(home)
+    assert path == home.path / "bin" / "micromamba-2.9.0" / "micromamba" == mm.pinned_path(home)
     assert path.read_bytes() == FAKE_BINARY
     assert os.access(path, os.X_OK)
     assert calls == [mm.MICROMAMBA_URL]
     assert mm.install_micromamba(home, opener=opener) == path
     assert calls == [mm.MICROMAMBA_URL], "a verified binary is not downloaded again"
-    assert [p.name for p in path.parent.iterdir()] == ["micromamba-2.9.0"], "no temp files left"
+    assert [p.name for p in path.parent.iterdir()] == ["micromamba"], "no temp files left"
+    assert [p.name for p in path.parent.parent.iterdir()] == ["micromamba-2.9.0"], "no temp files left"
 
 
 def test_install_rejects_a_wrong_archive_checksum(home, pinned_fake, monkeypatch):
@@ -110,3 +111,22 @@ def test_find_uses_the_pinned_binary_or_explains(home, pinned_fake):
         mm.find_micromamba(home, {})
     path = mm.install_micromamba(home, opener=pinned_fake[0])
     assert mm.find_micromamba(home, {}) == path
+
+
+# -- final review --------------------------------------------------------------------
+
+
+def test_pinned_binary_is_named_micromamba(home):
+    """micromamba names itself after its file in the hints and errors it prints
+    ("micromamba-2.9 run -n ..." for a file named micromamba-2.9.0), so the pinned
+    file must be called `micromamba`, the name the shim serves."""
+    assert mm.pinned_path(home).name == "micromamba"
+    assert mm.pinned_path(home).parent == home.path / "bin" / "micromamba-2.9.0"
+
+
+def test_install_replaces_a_binary_stored_in_the_earlier_layout(home, pinned_fake):
+    old = home.path / "bin" / "micromamba-2.9.0"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(b"old layout")
+    path = mm.install_micromamba(home, opener=pinned_fake[0])
+    assert path == old / "micromamba" and path.read_bytes() == FAKE_BINARY
