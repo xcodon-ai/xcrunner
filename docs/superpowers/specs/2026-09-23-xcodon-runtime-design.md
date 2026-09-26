@@ -1094,11 +1094,10 @@ For the proot engine it is the rootfs copy compared with the image rootfs.
   `site-packages` or `dist-packages` directory. Name and version come from
   `METADATA` or `PKG-INFO`. Download caches such as `/root/.cache` also hold
   `*.dist-info` folders and are ignored by this parent rule.
-- R: a `DESCRIPTION` file in a directory whose parent is an R library, that
-  is a directory named `library` or `site-library`, or one holding a
-  `DESCRIPTION`-bearing sibling with a `Meta/package.rds` file. Name and
-  version come from its `Package:` and `Version:` fields; `url` from
-  `Repository:` when present.
+- R: a directory that holds both `DESCRIPTION` and `Meta/package.rds`,
+  which every installed R package has and source folders do not. Name and
+  version come from the `Package:` and `Version:` fields of `DESCRIPTION`;
+  `url` from `Repository:` when present.
 - apt: `var/lib/dpkg/status` in the layer compared with the image's copy.
   Stanzas with `Status: install ok installed` are parsed for `Package`,
   `Architecture` and `Version`.
