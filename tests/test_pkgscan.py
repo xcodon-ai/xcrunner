@@ -128,3 +128,134 @@ def test_ns_opaque_directory_hides_base_packages(tmp_path):
 def test_pkg_json_round_trip():
     p = Pkg("R", "x", "1", "/lib", "/lib/x", "CRAN")
     assert pkgscan.pkg_from_json(pkgscan.pkg_to_json(p)) == p
+
+
+def test_dpkg_status_file_larger_than_1mb(tmp_path):
+    """Test that dpkg status files larger than 1 MiB are fully read."""
+    root = tmp_path / "rootfs"
+    root.mkdir()
+    status_dir = root / "var" / "lib" / "dpkg"
+    status_dir.mkdir(parents=True)
+    status_file = status_dir / "status"
+
+    stanzas = []
+    for i in range(100):
+        stanzas.append(f"""Package: pkg{i}
+Status: install ok installed
+Architecture: amd64
+Version: 1.0.0
+Description: A package with a long description
+ to make the file size larger
+ and ensure we exceed 1 MiB
+ when we have enough stanzas
+ This is a long description field
+ that spans multiple lines
+ and contains lots of text
+ to inflate the file size
+
+""")
+
+    status_text = "\n".join(stanzas)
+    status_file.write_text(status_text)
+
+    got = scan_tree(root)
+    pkg_names = {p.name for p in got}
+    for i in range(100):
+        assert f"pkg{i}:amd64" in pkg_names, f"Package pkg{i} was not found in scan_tree result"
+
+
+def test_held_package_is_accepted():
+    """Test that dpkg packages with hold status are recognized."""
+    status = """Package: held-pkg
+Status: hold ok installed
+Architecture: amd64
+Version: 1.2.3
+"""
+    pkgs = parse_dpkg_status(status)
+    assert len(pkgs) == 1
+    assert pkgs[0].name == "held-pkg:amd64"
+    assert pkgs[0].version == "1.2.3"
+
+
+def test_partial_overlay_copy_up_keeps_base_entry(tmp_path):
+    """Test that a partially copied-up directory in non-opaque upper keeps base entry."""
+    base_root = tmp_path / "base"
+    pip_pkg(base_root, "foo", "1.0")
+    base = scan_tree(base_root)
+
+    upper = tmp_path / "upper"
+    d = f"{SP}/foo-1.0.dist-info"
+    put(upper, f"{d}/RECORD", "partial metadata")
+
+    got = {(c["name"], c["change"]) for c in changes(base, ns_layer_packages(upper, base))}
+    assert got == set()
+
+
+def test_partial_overlay_copy_up_with_opaque_removes_entry(tmp_path):
+    """Test that an opaque upper directory with partial metadata removes base entry."""
+    base_root = tmp_path / "base"
+    pip_pkg(base_root, "foo", "1.0")
+    upper = tmp_path / "upper"
+    d = f"{SP}/foo-1.0.dist-info"
+    put(upper, f"{d}/RECORD", "partial metadata")
+    try:
+        os.setxattr(upper / SP / "foo-1.0.dist-info", "user.overlay.opaque", b"y")
+    except OSError:
+        pytest.skip("user xattrs unsupported here")
+    base = scan_tree(base_root)
+    got = {(c["name"], c["change"]) for c in changes(base, ns_layer_packages(upper, base))}
+    assert got == {("foo", "removed")}
+
+
+def test_pip_name_normalization(tmp_path):
+    """Test that pip names are normalized for key matching."""
+    base_root = tmp_path / "base"
+    pip_pkg(base_root, "Foo-Bar", "2.0")
+
+    upper = tmp_path / "upper"
+    pip_pkg(upper, "foo_bar", "2.1")
+
+    base = scan_tree(base_root)
+    got = {(c["name"], c["version"], c["change"]) for c in changes(base, ns_layer_packages(upper, base))}
+    assert got == {("foo_bar", "2.1", "changed")}
+
+
+def test_pip_version_natural_sort(tmp_path):
+    """Test that natural sorting picks highest version."""
+    root = tmp_path / "rootfs"
+    pip_pkg(root, "foo", "1.9.0")
+    pip_pkg(root, "foo", "1.10.0")
+    got = {(p.name, p.version) for p in scan_tree(root)}
+    assert got == {("foo", "1.10.0")}
+
+
+def test_utf8_bom_in_r_description(tmp_path):
+    """Test that UTF-8 BOM in R DESCRIPTION is handled."""
+    root = tmp_path / "rootfs"
+    lib = "usr/local/lib/R/site-library"
+    r_dir = root / lib / "testpkg"
+    r_dir.mkdir(parents=True)
+    (r_dir / "Meta").mkdir()
+    put(r_dir / "Meta", "package.rds", "x")
+
+    desc_file = r_dir / "DESCRIPTION"
+    with open(desc_file, "wb") as f:
+        f.write(b"\xef\xbb\xbf")
+        f.write("Package: testpkg\nVersion: 1.0\n".encode("utf-8"))
+
+    got = {(p.name, p.version) for p in scan_tree(root)}
+    assert got == {("testpkg", "1.0")}
+
+
+def test_00lock_directory_is_skipped(tmp_path):
+    """Test that R 00LOCK directories are skipped."""
+    root = tmp_path / "rootfs"
+    lib = "usr/local/lib/R/site-library"
+
+    lock_dir = root / lib / "00LOCK-dplyr" / "00new" / "dplyr"
+    lock_dir.mkdir(parents=True)
+    put(lock_dir, "DESCRIPTION", "Package: dplyr\nVersion: 1.0\n")
+    put(lock_dir, "Meta/package.rds", "x")
+
+    got = scan_tree(root)
+    assert len(got) == 0

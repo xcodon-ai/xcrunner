@@ -1093,22 +1093,30 @@ For the proot engine it is the rootfs copy compared with the image rootfs.
 - pip: `*.dist-info` and `*.egg-info` directories whose parent is a
   `site-packages` or `dist-packages` directory. Name and version come from
   `METADATA` or `PKG-INFO`. Download caches such as `/root/.cache` also hold
-  `*.dist-info` folders and are ignored by this parent rule.
+  `*.dist-info` folders and are ignored by this parent rule. Package identity
+  uses the PEP 503 normalized name (runs of `-`, `_`, `.` become a single `-`,
+  lowercased). When multiple versions exist in one location, the highest version
+  (natural sort) is kept.
 - R: a directory that holds both `DESCRIPTION` and `Meta/package.rds`,
   which every installed R package has and source folders do not. Name and
   version come from the `Package:` and `Version:` fields of `DESCRIPTION`;
-  `url` from `Repository:` when present.
+  `url` from `Repository:` when present. Directories whose name starts with
+  `00LOCK` are skipped (R install lock folders).
 - apt: `var/lib/dpkg/status` in the layer compared with the image's copy.
-  Stanzas with `Status: install ok installed` are parsed for `Package`,
-  `Architecture` and `Version`.
+  Stanzas whose `Status` ends with `ok installed` are parsed for `Package`,
+  `Architecture` and `Version`. This includes held packages (`hold ok installed`,
+  `install ok installed`, etc.).
 - conda inside the image: `conda-meta/*.json` files; `name`, `version` and
   `url` from the JSON.
 
 A package whose metadata directory is new in the layer is `added`. One that
 exists in both with a different version is `changed`. One whose metadata is
 removed by a whiteout, an opaque parent, or its absence from the proot copy
-is `removed`. A metadata file that cannot be parsed is skipped with a debug
-log, never an error.
+is `removed`. When an overlay upper holds a partially copied-up metadata folder
+(e.g., a directory with only some files like `RECORD`, not the full metadata)
+and the upper directory is not opaque, the base entry is kept; this represents
+in-place package modifications that do not replace the package. A metadata file
+that cannot be parsed is skipped with a debug log, never an error.
 
 ### 13.4 When the record is written
 

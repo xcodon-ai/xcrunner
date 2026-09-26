@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -21,6 +22,23 @@ DPKG_STATUS = "/var/lib/dpkg/status"
 OPAQUE_XATTRS = ("user.overlay.opaque", "trusted.overlay.opaque")
 _SKIP_TOP = {"proc", "sys", "dev"}
 _MAX_META = 1 << 20
+_MAX_DPKG = 256 << 20  # 256 MiB for dpkg status
+
+
+def _norm_name(name: str) -> str:
+    """PEP 503 normalization: replace runs of -, _, . with single -."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _natural_sort_key(version: str) -> tuple:
+    """Split version on digit boundaries for natural sorting."""
+    parts = []
+    for part in re.split(r"(\d+)", version):
+        if part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((1, part))
+    return tuple(parts)
 
 
 @dataclass(frozen=True)
@@ -34,7 +52,8 @@ class Pkg:
 
     @property
     def key(self) -> tuple[str, str, str]:
-        return (self.manager, self.location, self.name)
+        norm_name = _norm_name(self.name) if self.manager == "pip" else self.name
+        return (self.manager, self.location, norm_name)
 
 
 def pkg_to_json(p: Pkg) -> dict:
@@ -63,7 +82,15 @@ def is_opaque(path: Path) -> bool:
 def _read(path: Path) -> str | None:
     try:
         with open(path, "rb") as f:
-            return f.read(_MAX_META).decode("utf-8", errors="replace")
+            return f.read(_MAX_META).decode("utf-8-sig", errors="replace")
+    except OSError:
+        return None
+
+
+def _read_large(path: Path) -> str | None:
+    try:
+        with open(path, "rb") as f:
+            return f.read(_MAX_DPKG).decode("utf-8-sig", errors="replace")
     except OSError:
         return None
 
@@ -131,7 +158,8 @@ def parse_dpkg_status(text: str) -> list[Pkg]:
     out = []
     for stanza in text.split("\n\n"):
         h = _headers(stanza.strip("\n"))
-        if h.get("Status") != "install ok installed" or not h.get("Package") or not h.get("Version"):
+        status = h.get("Status", "")
+        if not status.endswith("ok installed") or not h.get("Package") or not h.get("Version"):
             continue
         arch = h.get("Architecture", "")
         name = h["Package"] if arch in ("", "all") else f"{h['Package']}:{arch}"
@@ -152,7 +180,7 @@ def _classify(host: Path, cpath: str, is_dir: bool) -> list[Pkg] | None:
         pkg = _conda(host, cpath)
         return [pkg] if pkg else []
     if not is_dir and cpath == DPKG_STATUS:
-        return parse_dpkg_status(_read(host) or "")
+        return parse_dpkg_status(_read_large(host) or "")
     return None
 
 
@@ -168,6 +196,7 @@ def scan_tree(root: Path) -> list[Pkg]:
         rel_dir = "/" if rel == "." else "/" + rel
         if rel_dir == "/":
             dirnames[:] = [d for d in dirnames if d not in _SKIP_TOP]
+        dirnames[:] = [d for d in dirnames if not d.startswith("00LOCK")]
         dirnames.sort()
         for name in list(dirnames) + sorted(filenames):
             host = Path(dirpath) / name
@@ -178,7 +207,8 @@ def scan_tree(root: Path) -> list[Pkg]:
             if pkgs is None:
                 continue
             for pkg in pkgs:
-                found[pkg.key] = pkg
+                if pkg.key not in found or _natural_sort_key(pkg.version) > _natural_sort_key(found[pkg.key].version):
+                    found[pkg.key] = pkg
             if is_dir:
                 dirnames.remove(name)
     return sorted(found.values(), key=lambda p: p.key)
@@ -199,6 +229,7 @@ def ns_layer_packages(upper: Path, base: list[Pkg]) -> list[Pkg]:
         rel_dir = "/" if rel == "." else "/" + rel
         if rel_dir != "/" and is_opaque(Path(dirpath)):
             _drop_under(merged, rel_dir)
+        dirnames[:] = [d for d in dirnames if not d.startswith("00LOCK")]
         dirnames.sort()
         for name in list(dirnames) + sorted(filenames):
             host = Path(dirpath) / name
@@ -217,6 +248,10 @@ def ns_layer_packages(upper: Path, base: list[Pkg]) -> list[Pkg]:
             is_dir = stat.S_ISDIR(st.st_mode)
             pkgs = _classify(host, cpath, is_dir)
             if pkgs is None:
+                continue
+            if pkgs == [] and is_dir and not is_opaque(host):
+                if name in dirnames:
+                    dirnames.remove(name)
                 continue
             _drop_under(merged, cpath)
             for pkg in pkgs:
