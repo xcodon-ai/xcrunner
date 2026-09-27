@@ -73,15 +73,25 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Checkout the tag, for its release notes
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.tag }}
+          path: src
+
+      # .github/release-notes/<tag>.md in the tagged commit becomes the release
+      # body; without one, GitHub generates the notes.
       - name: Create the release, or add the files to it
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.build.outputs.tag }}
         run: |
+          notes=(--generate-notes)
+          if [ -f "src/.github/release-notes/$TAG.md" ]; then notes=(--notes-file "src/.github/release-notes/$TAG.md"); fi
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag -R "$GITHUB_REPOSITORY"
+            gh release create "$TAG" dist/* --title "$TAG" "${notes[@]}" --verify-tag -R "$GITHUB_REPOSITORY"
           fi
 
   pypi:
