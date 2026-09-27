@@ -13,12 +13,12 @@ Two engines, chosen automatically:
 
 ## Install
 
-    pip install xcodon-runtime            # or: uv pip install xcodon-runtime
+    pip install xc-xrunner                # or: uv pip install xc-xrunner
     xrunner info                            # shows the engine and probe results
 
-Optional: `pip install 'xcodon-runtime[zstd]'` for zstd-compressed layers.
+Optional: `pip install 'xc-xrunner[zstd]'` for zstd-compressed layers.
 On aarch64 hosts without user namespaces, provide a PRoot binary with
-`XCODON_PROOT=/path/to/proot`. The command is `xrunner`; the package and its Python module keep the name xcodon-runtime.
+`XCODON_PROOT=/path/to/proot`. The command is `xrunner`. The package on PyPI is `xc-xrunner`, and the Python module is `xcodon_runtime`.
 ## Use
 
     xrunner pull python:3.12-slim

@@ -599,7 +599,7 @@ def cmd_sandbox(rt: Runtime, args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="xrunner", description="Rootless container runtime for Docker images.")
-    p.add_argument("--version", action="version", version=f"xcodon-runtime {__version__}")
+    p.add_argument("--version", action="version", version=f"xc-xrunner {__version__}")
     p.add_argument("-v", "--verbose", action="count", default=0, help="-v for info, -vv for debug")
     p.add_argument("--engine", choices=("ns", "proot"), help="force an engine (default: probe the host)")
     p.add_argument("--home", help="runtime home (default: $XCODON_RUNTIME_HOME or ~/.xcodon/runtime)")

@@ -33,7 +33,7 @@ def open_layer_stream(path: Path) -> BinaryIO:
             import zstandard
         except ImportError:
             raise UnsupportedLayer(
-                f"{path.name} is zstd-compressed; install the extra: pip install 'xcodon-runtime[zstd]'"
+                f"{path.name} is zstd-compressed; install the extra: pip install 'xc-xrunner[zstd]'"
             ) from None
         return zstandard.ZstdDecompressor().stream_reader(  # type: ignore[return-value]
             open(path, "rb")
