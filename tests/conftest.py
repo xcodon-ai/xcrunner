@@ -171,3 +171,32 @@ def pack_rootfs_as_image(home: RuntimeHome, rootfs: Path, ref: str, config: dict
 @pytest.fixture
 def busybox_image(home, busybox_rootfs):
     return pack_rootfs_as_image(home, busybox_rootfs, "xcodon-test/busybox:latest")
+
+
+@pytest.fixture
+def mac(home, tmp_path, monkeypatch):
+    """A faked Apple silicon Mac with a fake Lima on PATH. Yields the fake folders and an environ."""
+    from tests.fake_lima import make_fakes
+    from xcodon_runtime import macvm
+
+    fakes = make_fakes(tmp_path / "fakes")
+    mac_home = tmp_path / "machome"
+    mac_home.mkdir()
+    monkeypatch.setenv("HOME", str(mac_home))
+    monkeypatch.setenv("PATH", f"{fakes['bin']}:/usr/bin:/bin")
+    monkeypatch.setenv("LIMA_HOME", str(fakes["lima_home"]))
+    monkeypatch.setenv("FAKE_LIMA_STATE", str(fakes["state"]))
+    monkeypatch.setenv("FAKE_VM_HOME", str(fakes["vm_home"]))
+    for name in ("XRUNNER_MACHINE_NAME", "XRUNNER_MACHINE_CPUS", "XRUNNER_MACHINE_MEMORY",
+                 "XRUNNER_MACHINE_DISK", "XRUNNER_MACHINE_MOUNTS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(macvm, "check_host", lambda: None)
+    if not Path("/private/tmp").is_dir():
+        # pytest's tmp_path is under /tmp. On a Mac, the VM shares the Mac's /tmp as
+        # /private/tmp; this Linux host has none, so keep paths as they are here.
+        # The rewrite itself is covered by the unit tests in test_macvm_forward.py.
+        monkeypatch.setattr(macvm, "mac_path", lambda path: path)
+    monkeypatch.setattr(macvm, "is_macos", lambda: True)
+    monkeypatch.chdir(mac_home)
+    fakes["mac_home"] = mac_home
+    return fakes

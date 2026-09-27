@@ -753,7 +753,18 @@ def _configure_logging(verbosity: int) -> None:
 
 def main(argv: list[str] | None = None, _runtime: Runtime | None = None) -> int:
     """`_runtime` lets `cmd_docker` re-enter `main` with the same Runtime (and so the
-    same --engine/--home) after translating a docker invocation to an xrunner one."""
+    same --engine/--home) after translating a docker invocation to an xrunner one.
+
+    On macOS, the outer call goes to `macvm.mac_main`, which runs a few commands on
+    the Mac and forwards the rest to the xrunner VM (spec section 16)."""
+    if _runtime is None and sys.platform == "darwin":
+        from xcodon_runtime.macvm import mac_main
+
+        return mac_main(list(sys.argv[1:] if argv is None else argv), _main_local)
+    return _main_local(argv, _runtime)
+
+
+def _main_local(argv: list[str] | None = None, _runtime: Runtime | None = None) -> int:
     parser = build_parser()
     head, rest = _split_argv(list(sys.argv[1:] if argv is None else argv))
     # `docker ...` (any verb but run/create) comes back from `_split_argv` as (argv,
