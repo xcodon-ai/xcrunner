@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Iterator, TextIO
 
 from xcodon_runtime import __version__
-from xcodon_runtime.envdir import ENV_INFO_NAME
+from xcodon_runtime.envdir import ENV_INFO_NAME, env_layer_dir, env_layer_root
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.pkgscan import Pkg, changes, ns_layer_packages, read_bytes, scan_tree
 
@@ -268,7 +268,7 @@ def _layer_info(layer: Path) -> dict:
 
 def _layer_entry(env_dir: Path, image_id: str, store) -> tuple[str, dict | None]:
     """What the ``layers`` entry for one folder should become: ("set", entry), ("drop", None) or ("keep", None)."""
-    layer = Path(env_dir) / image_id
+    layer = env_layer_dir(env_dir, image_id)
     has_upper = (layer / "upper").is_dir()
     has_rootfs = (layer / "rootfs").is_dir()
     if not has_upper and not has_rootfs:
@@ -356,9 +356,10 @@ def record_conda(env_dir: Path) -> None:
 
 
 def _layer_folders(env_dir: Path) -> list[Path]:
-    if not env_dir.is_dir():
+    root = env_layer_root(env_dir)
+    if not root.is_dir():
         return []
-    return sorted(d for d in env_dir.iterdir() if _HEX64.match(d.name) and d.is_dir() and not d.is_symlink())
+    return sorted(d for d in root.iterdir() if _HEX64.match(d.name) and d.is_dir() and not d.is_symlink())
 
 
 def _after_scan() -> None:

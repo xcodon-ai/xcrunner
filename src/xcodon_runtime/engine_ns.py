@@ -17,7 +17,14 @@ from pathlib import Path
 
 from xcodon_runtime.containers import Container
 from xcodon_runtime.engine import container_lock
-from xcodon_runtime.envdir import ENV_LOCK_NAME, acquire_env_lock, env_layer_dir, prepare_env_layer
+from xcodon_runtime.envdir import (
+    ENV_LAYER_DIR_ENV,
+    ENV_LOCK_NAME,
+    acquire_env_lock,
+    env_layer_dir,
+    env_layer_root,
+    prepare_env_layer,
+)
 from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable
 from xcodon_runtime.keeper import KEEPER_LOG, KEEPER_PLAN
 
@@ -54,8 +61,12 @@ def _overlay_failure_hint(container: Container) -> str:
     """What to tell the user when a keeper with an env folder fails before ready."""
     if not container.env_dir:
         return ""
-    return ("the env folder must be on a local filesystem that supports overlay upper layers "
-            "(not NFS or similar)")
+    root = env_layer_root(container.env_dir)
+    if root == Path(container.env_dir):
+        return ("the env folder must be on a local filesystem that supports overlay upper layers "
+                f"(not NFS or similar); or set {ENV_LAYER_DIR_ENV} to a local disk")
+    return (f"the env layer folder {root} must be on a local filesystem that supports overlay upper "
+            f"layers (not NFS or similar); set {ENV_LAYER_DIR_ENV} to a local disk")
 
 
 class NsEngine:

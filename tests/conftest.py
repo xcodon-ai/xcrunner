@@ -42,6 +42,7 @@ def home(tmp_path: Path, monkeypatch) -> RuntimeHome:
     root = tmp_path / "runtime-home"
     monkeypatch.setenv("XCODON_RUNTIME_HOME", str(root))
     monkeypatch.delenv("XRUNNER_CONTAINER_DIR", raising=False)
+    monkeypatch.delenv("XRUNNER_ENV_LAYER_DIR", raising=False)
     return RuntimeHome(root)
 
 
