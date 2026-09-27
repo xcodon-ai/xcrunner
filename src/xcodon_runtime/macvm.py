@@ -626,6 +626,11 @@ def run_forwarded(m: Machine, argv: Sequence[str], environ: Mapping[str, str], e
 
 def _mac_info(m: Machine, globals_: list[str], environ: Mapping[str, str], out: TextIO, err: TextIO) -> int:
     doc: dict = {"platform": "macos", "machine": m.status()}
+    if doc["machine"]["status"] != "Running":
+        # `info` reports; it does not create or start the VM.
+        doc["vm"] = {"error": "the xrunner VM is not running; start it with `xrunner machine start`"}
+        print(json.dumps(doc, indent=2), file=out)
+        return 0
     try:
         code, output = run_forwarded(m, [*globals_, "info"], environ, err, capture=True)
         doc["vm"] = json.loads(output) if code == 0 else {"error": f"`xrunner info` in the VM exited {code}"}

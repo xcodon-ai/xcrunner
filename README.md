@@ -191,10 +191,37 @@ writable layer, its keeper log and its locks live under `XRUNNER_CONTAINER_DIR`.
 Containers are then local to one node: `xrunner ps` on another node does not list
 them. `xrunner info` shows both folders and the engine the probes chose.
 
-The setting does not move an env folder. An env folder keeps a writable layer across
-containers, so on the ns engine it must also be on a local disk. Point
-`XRUNNER_ENV_DIR` at node-local storage, or set `XCODON_ENGINE=proot` to keep it on
-shared storage.
+The setting does not move an env folder's layers. On the ns engine they must also be
+on a local disk. Set `XRUNNER_ENV_LAYER_DIR` to node-local storage: the record stays
+in the project's env folder, and each node keeps its own layers for as long as that
+disk lasts. Or set `XCODON_ENGINE=proot` to keep the layers on shared storage.
+
+## macOS
+
+On an Apple silicon Mac with macOS 26 or newer, xrunner runs the Linux xrunner
+inside one Lima VM. Install Lima first:
+
+    brew install lima
+    pip install xc-xrunner
+    xrunner machine start        # the first start creates the VM and takes a few minutes
+    xrunner run --rm alpine echo hi
+
+- The VM is a Lima `vz` VM named `xrunner` with Ubuntu 24.04 and Rosetta. Images,
+  layers and containers live on its own disk.
+- Your home folder, `/private/var/folders` and `/private/tmp` are shared into the VM
+  at the same paths, so bind mounts and cwltool's temp folders work unchanged. Work
+  in one of those folders, or add more with `XRUNNER_MACHINE_MOUNTS` before the VM is
+  created.
+- `conda`, `shim`, `sandbox` and `machine` run on the Mac. Every other command runs
+  in the VM. The conda shim installs macOS programs with a macOS micromamba.
+- Env folder layers live on the VM disk; the record in `.xrunner-env` stays with the
+  project. `xrunner info` shows where the layers are.
+- x86_64-only images, such as most biocontainers, run through Rosetta.
+- `xrunner machine status|stop|shell|rm` manage the VM. `rm` deletes its disk,
+  with all images and env layers.
+
+`scripts/mac_smoke.sh` runs the end-to-end checks on a Mac and writes a report to
+`~/xrunner-mac-smoke.txt`.
 
 ## Environment variables
 
@@ -202,6 +229,10 @@ shared storage.
 |---|---|
 | `XCODON_RUNTIME_HOME` | State directory. Default `~/.xcodon/runtime`. |
 | `XRUNNER_CONTAINER_DIR` | Container folders. Default `<home>/containers`. |
+| `XRUNNER_ENV_LAYER_DIR` | Env folder layers on another disk. Default: in the env folder. On a cluster, a node-local disk gives each node its own layers. |
+| `XRUNNER_MACHINE_NAME` | macOS: the Lima VM's name. Default `xrunner`. |
+| `XRUNNER_MACHINE_CPUS`, `XRUNNER_MACHINE_MEMORY`, `XRUNNER_MACHINE_DISK` | macOS: VM size when it is created. Defaults `4`, `4GiB`, `100GiB`. |
+| `XRUNNER_MACHINE_MOUNTS` | macOS: extra Mac folders to share, separated by `:`. |
 | `XCODON_ENGINE` | `ns` or `proot`. Skips probing. |
 | `XCODON_PROOT` | Path to a PRoot binary. |
 | `XCODON_PROOT_ARGS` | Extra PRoot flags, for example `-k 5.15.0`. |
@@ -214,6 +245,7 @@ shared storage.
 - Host network only. No `--net=none`, no port mapping.
 - No cgroups. `--memory` and `--cpus` are accepted and ignored with a warning.
 - No GPU passthrough.
+- macOS: Apple silicon and macOS 26 or newer only, through a Lima VM.
 - Read-only binds apply to the top mount only; submounts under a bound host
   path stay writable.
 

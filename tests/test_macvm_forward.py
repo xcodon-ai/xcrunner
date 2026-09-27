@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 
 import pytest
 
@@ -142,6 +143,7 @@ def _mac_main(argv, environ=None):
     return code, out.getvalue(), err.getvalue()
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="the fake VM runs the CLI on this host, which must be Linux")
 def test_a_forwarded_run_streams_output_and_exit_code(mac, busybox_image, engine_name, capfd):
     code, _, err = _mac_main(["--engine", engine_name, "run", "--rm", "-e", "FOO", "xcodon-test/busybox",
                               "/bin/sh", "-c", "echo got $FOO; exit 3"], {"FOO": "from-mac"})
@@ -153,6 +155,7 @@ def test_a_forwarded_run_streams_output_and_exit_code(mac, busybox_image, engine
     assert f"--expect-version {__version__}" in call[-1] and f"--cwd {mac['mac_home']}" in call[-1]
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="the fake VM runs the CLI on this host, which must be Linux")
 def test_images_and_info_through_the_vm(mac):
     code, _, err = _mac_main(["images"])
     assert code == 0, err
@@ -161,6 +164,13 @@ def test_images_and_info_through_the_vm(mac):
     doc = json.loads(out)
     assert doc["platform"] == "macos" and doc["machine"]["status"] == "Running"
     assert doc["vm"]["version"] == __version__ and "engine" in doc["vm"]
+
+
+def test_info_does_not_start_the_vm(mac):
+    code, out, _ = _mac_main(["info"])
+    doc = json.loads(out)
+    assert code == 0 and doc["machine"]["status"] == "absent" and "not running" in doc["vm"]["error"]
+    assert "create" not in [a[0] for a in log(mac["state"], "limactl")]
 
 
 def test_an_unshared_folder_fails_before_the_vm_starts(mac, monkeypatch):
