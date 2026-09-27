@@ -1,37 +1,103 @@
-name: Build and publish to PyPI
+name: Release
+
+# A pushed v* tag builds the package, creates the GitHub release with the wheel
+# and sdist attached, and publishes to PyPI. For a tag pushed before this
+# workflow existed, run it by hand: gh workflow run release.yml -f tag=v0.1.1
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release, for example v0.1.1"
+        required: true
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
 
 jobs:
-  build-and-publish:
-    name: Build and publish to PyPI
+  build:
+    name: Build
     runs-on: ubuntu-latest
-    environment: pypi
-
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
+      - name: Pick the tag
+        id: tag
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
           python-version: "3.11"
 
+      - name: Check the tag matches the package version
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          test "${TAG#v}" = "$version" || { echo "tag $TAG does not match version $version"; exit 1; }
+
       - name: Build package
         run: uv build
 
-      - name: Check the tag matches the package version
-        if: github.event_name == 'release'
+      - name: Check the wheel carries the PRoot binary
+        run: unzip -l dist/*.whl | grep -q 'xcodon_runtime/_bin/proot-x86_64'
+
+      - name: Keep the files
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    name: GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create the release, or add the files to it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
         run: |
-          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          test "${GITHUB_REF_NAME#v}" = "$version" || { echo "tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag -R "$GITHUB_REPOSITORY"
+          fi
+
+  pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
