@@ -14,7 +14,7 @@ from typing import Mapping, Sequence, TextIO
 
 from xcodon_runtime.condaroot import abs_prefix, ensure_root, lookup_root, opt_value, resolve_root, split_option
 from xcodon_runtime.home import RuntimeHome
-from xcodon_runtime.micromamba import find_micromamba
+from xcodon_runtime.micromamba import find_micromamba, host_subdir
 
 PKGS_DIRNAME = "conda-pkgs"
 PRIVATE_HOME = ".home"
@@ -59,6 +59,13 @@ ACTIVATE_MSG = ("conda {verb}: activation changes the calling shell, which xrunn
 # `conda -q run ...`) that take a separate value, so the pre-verb scan below can
 # skip past it without mistaking it for the verb.
 _PRE_VERB_VALUE_OPTS = ("-r", "--root-prefix")
+
+
+# Some bioconda tools have no macOS ARM build. Micromamba's output streams
+# straight through, so the shim does not read it; it only adds this line after a
+# failed install on osx-arm64 (spec 16.6).
+OSX_ARM_HINT = ("xrunner: hint: if a package was not found, it may have no macOS ARM build; "
+                "`--platform osx-64` installs x86_64 builds that run under Rosetta 2")
 
 
 def _split_before_run(argv: Sequence[str]) -> tuple[list[str], list[str]] | None:
@@ -348,6 +355,8 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
         _warn_home_root(root.path, err)
     env = micromamba_env(root.path, home, environ)
     code = subprocess.run(micromamba_argv(mm, p, root.path), env=env, cwd=cwd).returncode
+    if code != 0 and p.verb in ("create", "install", "update") and host_subdir() == "osx-arm64":
+        print(OSX_ARM_HINT, file=err)
     if code != 0 or DRY_RUN_FLAGS & set(p.tokens):
         return code
     is_drop = p.key == "env remove" or (p.key in REMOVE_ALL_VERBS and p.remove_all)
