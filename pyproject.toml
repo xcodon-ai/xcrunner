@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xc-xrunner"
-version = "0.1.2"
+version = "0.1.3"
 description = "Rootless container runtime for Docker images, built for coala"
 readme = "README.md"
 license = { text = "MIT" }
