@@ -8,8 +8,24 @@ import pytest
 from xcodon_runtime import cli
 from xcodon_runtime.api import Runtime
 
+BASE = "coala-runtime-python:latest"
+
+
+def _daemon_has_base() -> bool:
+    try:
+        return subprocess.run(["/usr/bin/docker", "image", "inspect", BASE], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
 # Needs the stock image from the local daemon, and pip needs PyPI, so both markers apply.
-pytestmark = [pytest.mark.docker, pytest.mark.network]
+# A daemon without that image (a CI runner, for example) cannot run these tests either:
+# the name exists only where coala-runtime built it, never on a registry.
+pytestmark = [
+    pytest.mark.docker,
+    pytest.mark.network,
+    pytest.mark.skipif(not _daemon_has_base(), reason=f"the local docker daemon has no {BASE}"),
+]
 
 
 def test_agent_recipe_builds_and_runs_without_docker_commands(home, engine_name, tmp_path, monkeypatch):
