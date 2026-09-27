@@ -111,7 +111,7 @@ class ImageStore:
     def require(self, ref_or_id: str) -> Image:
         img = self.get(ref_or_id)
         if img is None:
-            raise ImageNotFound(f"image {ref_or_id!r} is not in the local store; run: xrunner pull {ref_or_id}")
+            raise ImageNotFound(f"image {ref_or_id!r} is not in the local store; run: xcrunner pull {ref_or_id}")
         return img
 
     def images(self) -> list[Image]:
@@ -316,7 +316,7 @@ class ImageStore:
             config["rootfs"]["diff_ids"] = diff_ids
             config["created"] = now
             config.setdefault("history", []).append(
-                {"created": now, "created_by": created_by or "xrunner commit", "empty_layer": layer_dir is None})
+                {"created": now, "created_by": created_by or "xcrunner commit", "empty_layer": layer_dir is None})
             canonical = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
             image_id = hashlib.sha256(canonical).hexdigest()
             image_dir = self.home.images / image_id

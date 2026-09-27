@@ -90,7 +90,7 @@ def _unwrap(container) -> Container:
 class XcodonContainerManager:
     """Rootfs files are owned by the invoking user and the writable layer persists, so installs work.
 
-    Set XRUNNER_ENV_DIR to keep installs across coala-runtime's per-call containers.
+    Set XCRUNNER_ENV_DIR to keep installs across coala-runtime's per-call containers.
     """
 
     system_site_packages_writable: bool = True

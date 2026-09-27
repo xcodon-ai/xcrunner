@@ -1,4 +1,4 @@
-"""XRUNNER_CONTAINER_DIR: container folders on a separate (node-local) disk. See spec section 15."""
+"""XCRUNNER_CONTAINER_DIR: container folders on a separate (node-local) disk. See spec section 15."""
 
 import os
 import shutil
@@ -14,8 +14,8 @@ from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.home import CONTAINER_DIR_ENV, RuntimeHome
 
 
-def test_the_setting_is_named_xrunner_container_dir():
-    assert CONTAINER_DIR_ENV == "XRUNNER_CONTAINER_DIR"
+def test_the_setting_is_named_xcrunner_container_dir():
+    assert CONTAINER_DIR_ENV == "XCRUNNER_CONTAINER_DIR"
 
 
 def test_default_container_dir_is_inside_the_home(tmp_path, monkeypatch):
@@ -109,7 +109,7 @@ def test_overlay_probe_puts_the_writable_side_in_the_container_dir(tmp_path, mon
 def local_dir(monkeypatch):
     """A container dir on another filesystem when /dev/shm exists, like a node-local disk under a shared home."""
     parent = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
-    d = Path(tempfile.mkdtemp(prefix="xrunner-local-", dir=parent)).resolve()
+    d = Path(tempfile.mkdtemp(prefix="xcrunner-local-", dir=parent)).resolve()
     monkeypatch.setenv(CONTAINER_DIR_ENV, str(d))
     yield d
     from xcodon_runtime.containers import _rmtree_tolerant

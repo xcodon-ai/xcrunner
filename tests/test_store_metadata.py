@@ -79,7 +79,7 @@ def test_build_records_its_dockerfile(home, busybox_image, engine_name, tmp_path
 def test_build_with_only_from_does_not_annotate_the_base_image(home, busybox_image, engine_name, tmp_path):
     """FROM alone (or FROM plus only ignored lines) ends on the base image itself:
     that image must not gain a dockerfile field, whether it was pulled or was
-    itself the final image of an earlier `xrunner build`."""
+    itself the final image of an earlier `xcrunner build`."""
     rt = Runtime(home.path, engine=engine_name)
     assert "dockerfile" not in rt.images.manifest(busybox_image)
 

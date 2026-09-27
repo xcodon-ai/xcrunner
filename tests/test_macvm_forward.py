@@ -74,10 +74,10 @@ def test_wants_tty():
 
 
 def test_forward_env_keeps_only_the_allowlist():
-    environ = {"XRUNNER_ENV_DIR": "/p/.xrunner-env", "XCODON_LOG": "debug", "https_proxy": "http://p:3128",
-               "XCODON_RUNTIME_HOME": "/mac/home", "XRUNNER_CONTAINER_DIR": "/c", "PATH": "/bin",
+    environ = {"XCRUNNER_ENV_DIR": "/p/.xcrunner-env", "XCODON_LOG": "debug", "https_proxy": "http://p:3128",
+               "XCODON_RUNTIME_HOME": "/mac/home", "XCRUNNER_CONTAINER_DIR": "/c", "PATH": "/bin",
                "SECRET_TOKEN": "x"}
-    assert forward_env(environ) == {"XRUNNER_ENV_DIR": "/p/.xrunner-env", "XCODON_LOG": "debug",
+    assert forward_env(environ) == {"XCRUNNER_ENV_DIR": "/p/.xcrunner-env", "XCODON_LOG": "debug",
                                     "https_proxy": "http://p:3128"}
 
 
@@ -99,7 +99,7 @@ def _local(calls):
 
 
 @pytest.mark.parametrize("argv", [["conda", "install", "x"], ["shim", "install", "conda"],
-                                  ["sandbox", "activate", "/p/.xrunner-env"], ["--version"], [], ["-h"]])
+                                  ["sandbox", "activate", "/p/.xcrunner-env"], ["--version"], [], ["-h"]])
 def test_local_commands(routed, argv):
     assert mac_main(argv, _local(routed), environ={}) == 0
     assert routed["local"] == [argv] and not routed["forwarded"]
@@ -150,8 +150,8 @@ def test_a_forwarded_run_streams_output_and_exit_code(mac, busybox_image, engine
     assert code == 3, err
     assert "got from-mac" in capfd.readouterr().out
     (call,) = [a for a in log(mac["state"], "ssh") if "xcodon_runtime.forwarded" in a[-1]]
-    assert call[:2] == ["-F", str(mac["lima_home"] / "xrunner" / "ssh.config")]
-    assert "-T" in call and "lima-xrunner" in call
+    assert call[:2] == ["-F", str(mac["lima_home"] / "xcrunner" / "ssh.config")]
+    assert "-T" in call and "lima-xcrunner" in call
     assert f"--expect-version {__version__}" in call[-1] and f"--cwd {mac['mac_home']}" in call[-1]
 
 
@@ -176,7 +176,7 @@ def test_info_does_not_start_the_vm(mac):
 def test_an_unshared_folder_fails_before_the_vm_starts(mac, monkeypatch):
     monkeypatch.chdir("/")  # pytest's tmp_path is under /tmp, which maps to the shared /private/tmp
     code, _, err = _mac_main(["ps"])
-    assert code == 125 and "/ is not shared with the xrunner VM" in err
+    assert code == 125 and "/ is not shared with the xcrunner VM" in err
     assert log(mac["state"], "ssh") == [] and "create" not in [a[0] for a in log(mac["state"], "limactl")]
 
 
@@ -184,7 +184,7 @@ def test_ssh_failure_is_reported(mac, monkeypatch):
     macvm.Machine.from_env(dict(os.environ)).ensure_ready(io.StringIO())
     monkeypatch.setenv("FAKE_SSH_EXIT", "255")
     code, _, err = _mac_main(["ps"])
-    assert code == 125 and "cannot reach the xrunner VM" in err
+    assert code == 125 and "cannot reach the xcrunner VM" in err
 
 
 def test_sigterm_on_the_mac_ends_ssh(mac, monkeypatch):

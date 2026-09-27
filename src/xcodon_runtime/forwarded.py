@@ -28,7 +28,7 @@ _FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 def default_layer_dir() -> Path:
     """Env folder layers on the VM disk: a shared Mac folder cannot hold an overlay upper layer."""
-    return Path.home() / ".xrunner-vm" / "env-layers"
+    return Path.home() / ".xcrunner-vm" / "env-layers"
 
 
 def _parse(argv: list[str]) -> tuple[str | None, str | None, dict[str, str], list[str]]:
@@ -55,7 +55,7 @@ def _parse(argv: list[str]) -> tuple[str | None, str | None, dict[str, str], lis
                 raise ValueError(f"forwarded: --env needs NAME=VALUE, got {value!r}")
             env[name] = val
         i += 2
-    raise ValueError("forwarded: missing -- before the xrunner arguments")
+    raise ValueError("forwarded: missing -- before the xcrunner arguments")
 
 
 def _run(cmd: list[str], env: dict[str, str], poll: float = POLL_SECONDS,
@@ -102,18 +102,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         expect, cwd, passed, rest = _parse(list(argv))
     except ValueError as e:
-        print(f"xrunner: {e}", file=sys.stderr)
+        print(f"xcrunner: {e}", file=sys.stderr)
         return EXIT_ERROR
     if expect is not None and expect != __version__:
-        print(f"xrunner: the VM has xrunner {__version__} and the Mac has {expect}; "
-              "run `xrunner machine start`", file=sys.stderr)
+        print(f"xcrunner: the VM has xcrunner {__version__} and the Mac has {expect}; "
+              "run `xcrunner machine start`", file=sys.stderr)
         return EXIT_ERROR
     if cwd is not None:
         try:
             os.chdir(cwd)
         except OSError:
-            print(f"xrunner: {cwd} is not a folder in the xrunner VM; only folders shared from the Mac "
-                  "exist there (see `xrunner machine status`)", file=sys.stderr)
+            print(f"xcrunner: {cwd} is not a folder in the xcrunner VM; only folders shared from the Mac "
+                  "exist there (see `xcrunner machine status`)", file=sys.stderr)
             return EXIT_ERROR
     env = dict(os.environ)
     env.update(passed)

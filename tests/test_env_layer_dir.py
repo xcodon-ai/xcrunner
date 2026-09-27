@@ -1,4 +1,4 @@
-"""XRUNNER_ENV_LAYER_DIR: env folder layers kept on another disk. See spec section 16.5."""
+"""XCRUNNER_ENV_LAYER_DIR: env folder layers kept on another disk. See spec section 16.5."""
 
 import hashlib
 import os
@@ -17,12 +17,12 @@ def _key(path: Path) -> str:
 
 
 def test_the_setting_name():
-    assert ENV_LAYER_DIR_ENV == "XRUNNER_ENV_LAYER_DIR"
+    assert ENV_LAYER_DIR_ENV == "XCRUNNER_ENV_LAYER_DIR"
 
 
 def test_unset_keeps_layers_in_the_env_folder(tmp_path, monkeypatch):
     monkeypatch.delenv(ENV_LAYER_DIR_ENV, raising=False)
-    env = tmp_path / "proj" / ".xrunner-env"
+    env = tmp_path / "proj" / ".xcrunner-env"
     assert env_layer_root(env) == env
     assert env_layer_dir(str(env), "ab" * 32) == env / ("ab" * 32)
 
@@ -30,7 +30,7 @@ def test_unset_keeps_layers_in_the_env_folder(tmp_path, monkeypatch):
 def test_set_moves_layers_under_a_key_of_the_env_folder(tmp_path, monkeypatch):
     layers = tmp_path / "layers"
     monkeypatch.setenv(ENV_LAYER_DIR_ENV, str(layers))
-    env = tmp_path / "proj" / ".xrunner-env"
+    env = tmp_path / "proj" / ".xcrunner-env"
     env.mkdir(parents=True)
     assert env_layer_root(env) == layers.resolve() / _key(env)
     assert env_layer_dir(str(env), "cd" * 32) == layers.resolve() / _key(env) / ("cd" * 32)
@@ -55,7 +55,7 @@ def test_overlay_separators_are_refused(tmp_path, monkeypatch, bad):
 def test_env_layers_live_in_the_layer_dir(home, busybox_image, engine_name, tmp_path, monkeypatch):
     layers = tmp_path / "layers"
     monkeypatch.setenv(ENV_LAYER_DIR_ENV, str(layers))
-    env = tmp_path / "proj" / ".xrunner-env"
+    env = tmp_path / "proj" / ".xcrunner-env"
     rt = Runtime(home.path, engine=engine_name)
     ref = "xcodon-test/busybox"
     image = rt.images.get(ref)
@@ -82,7 +82,7 @@ def test_env_layers_live_in_the_layer_dir(home, busybox_image, engine_name, tmp_
 
 def test_record_rebuild_finds_layers_in_the_layer_dir(home, busybox_image, tmp_path, monkeypatch):
     monkeypatch.setenv(ENV_LAYER_DIR_ENV, str(tmp_path / "layers"))
-    env = tmp_path / "proj" / ".xrunner-env"
+    env = tmp_path / "proj" / ".xcrunner-env"
     rt = Runtime(home.path, engine="proot")
     from xcodon_runtime.engine_proot import find_proot
 

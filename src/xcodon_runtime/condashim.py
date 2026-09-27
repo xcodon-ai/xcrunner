@@ -1,5 +1,5 @@
 # src/xcodon_runtime/condashim.py
-"""`xrunner conda`: conda's command line, answered by a pinned micromamba. See spec section 12."""
+"""`xcrunner conda`: conda's command line, answered by a pinned micromamba. See spec section 12."""
 
 from __future__ import annotations
 
@@ -41,19 +41,19 @@ _MUST_HAVE_VALUE = frozenset({"-r", "--root-prefix", "-n", "--name", "-p", "--pr
 # leaves nothing to record, and a record left from before would be stale.
 REMOVE_ALL_VERBS = frozenset({"remove", "uninstall"})
 CONFIG_NOT_SUPPORTED = (
-    "conda: xrunner's conda only supports `config list`; channels default to conda-forge "
+    "conda: xcrunner's conda only supports `config list`; channels default to conda-forge "
     "and bioconda, and -c adds more per command. Config changes are not supported.\n"
 )
 
 USAGE = """usage: conda COMMAND [OPTIONS]
 
-This conda is xrunner's front end over micromamba. Supported commands:
+This conda is xcrunner's front end over micromamba. Supported commands:
   create, install, update, remove, uninstall, list, search, info, clean, config,
   env list|create|export|remove, run
 Run a tool in an environment with:  conda run -n NAME COMMAND [ARGS...]
-Environments live in the project's .xrunner-env/conda folder.
+Environments live in the project's .xcrunner-env/conda folder.
 """
-ACTIVATE_MSG = ("conda {verb}: activation changes the calling shell, which xrunner's conda cannot do.\n"
+ACTIVATE_MSG = ("conda {verb}: activation changes the calling shell, which xcrunner's conda cannot do.\n"
                 "Run a tool with `conda run -n NAME CMD`, or call it as <prefix>/bin/CMD.")
 # Options micromamba accepts ahead of the verb (spec 12.5: `conda -r ROOT run ...`,
 # `conda -q run ...`) that take a separate value, so the pre-verb scan below can
@@ -64,7 +64,7 @@ _PRE_VERB_VALUE_OPTS = ("-r", "--root-prefix")
 # Some bioconda tools have no macOS ARM build. Micromamba's output streams
 # straight through, so the shim does not read it; it only adds this line after a
 # failed install on osx-arm64 (spec 16.6).
-OSX_ARM_HINT = ("xrunner: hint: if a package was not found, it may have no macOS ARM build; "
+OSX_ARM_HINT = ("xcrunner: hint: if a package was not found, it may have no macOS ARM build; "
                 "`--platform osx-64` installs x86_64 builds that run under Rosetta 2")
 
 
@@ -256,12 +256,12 @@ def target_prefix(p: Parsed, root: Path, cwd: Path) -> Path:
 
 def _write_record(mm: Path, prefix: Path, root: Path, env: dict[str, str], cwd: Path, err: TextIO) -> None:
     if not (prefix / "conda-meta").is_dir():
-        print(f"xrunner: warning: could not record the packages of {prefix}: no environment there", file=err)
+        print(f"xcrunner: warning: could not record the packages of {prefix}: no environment there", file=err)
         return
     r = subprocess.run([str(mm), "env", "export", "--no-rc", "-r", str(root), "-p", str(prefix), "--explicit"],
                        env=env, cwd=cwd, capture_output=True, text=True)
     if r.returncode != 0 or "@EXPLICIT" not in r.stdout:
-        print(f"xrunner: warning: could not record the packages of {prefix}: {r.stderr.strip()[:200]}", file=err)
+        print(f"xcrunner: warning: could not record the packages of {prefix}: {r.stderr.strip()[:200]}", file=err)
         return
     try:
         fd, tmp = tempfile.mkstemp(dir=prefix, prefix=".conda-explicit-")
@@ -277,7 +277,7 @@ def _write_record(mm: Path, prefix: Path, root: Path, env: dict[str, str], cwd: 
                 pass
             raise
     except OSError as e:
-        print(f"xrunner: warning: could not record the packages of {prefix}: {e}", file=err)
+        print(f"xcrunner: warning: could not record the packages of {prefix}: {e}", file=err)
 
 
 def _drop_record(prefix: Path, err: TextIO) -> None:
@@ -286,12 +286,12 @@ def _drop_record(prefix: Path, err: TextIO) -> None:
     try:
         (prefix / EXPLICIT_NAME).unlink(missing_ok=True)
     except OSError as e:
-        print(f"xrunner: warning: could not remove {prefix / EXPLICIT_NAME}: {e}", file=err)
+        print(f"xcrunner: warning: could not remove {prefix / EXPLICIT_NAME}: {e}", file=err)
 
 
 def _warn_home_root(root: Path, err: TextIO) -> None:
-    print(f"xrunner: no project env folder found; using {root} "
-          "(set XRUNNER_ENV_DIR or create .xrunner-env in the project)", file=err)
+    print(f"xcrunner: no project env folder found; using {root} "
+          "(set XCRUNNER_ENV_DIR or create .xcrunner-env in the project)", file=err)
 
 
 def _micromamba_version(mm: Path) -> str:
@@ -316,7 +316,7 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
         print(f"conda: {p.missing_value} needs a value", file=err)
         return 2
     if p.version:
-        print(f"conda {_micromamba_version(find_micromamba(home, environ))} (micromamba via xrunner)")
+        print(f"conda {_micromamba_version(find_micromamba(home, environ))} (micromamba via xcrunner)")
         return 0
     if p.verb is None:
         print(USAGE, end="", file=sys.stdout if p.help else err)
@@ -336,7 +336,7 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
         env = micromamba_env(root.path, home, environ)
         return subprocess.run([str(mm), "env"] + p.tokens, env=env, cwd=cwd).returncode
     if p.verb not in PASS_VERBS or (p.verb == "env" and p.sub not in ENV_SUBVERBS):
-        print(f"conda: '{p.key}' is not supported by xrunner's conda.\n{USAGE}", end="", file=err)
+        print(f"conda: '{p.key}' is not supported by xcrunner's conda.\n{USAGE}", end="", file=err)
         return 2
     if p.verb == "config":
         # p.tokens can start with a pre-verb option (`conda -q config list` puts `-q`
@@ -370,5 +370,5 @@ def conda_main(argv: Sequence[str], home: RuntimeHome, cwd: Path | None = None,
 
             record_conda(root.path.parent)
         except Exception as e:  # noqa: BLE001 - recording must never change the exit code
-            print(f"xrunner: warning: could not update the environment record: {e}", file=err)
+            print(f"xcrunner: warning: could not update the environment record: {e}", file=err)
     return code

@@ -113,8 +113,8 @@ def hub(reg, monkeypatch):
 
 HUB_HINT = (r"image docker\.io/library/coala-runtime-python:latest was not found on Docker Hub, or it needs a login; "
             r"if it is a local name, import it first, for example: "
-            r"xrunner pull OTHER/coala-runtime-python:latest && "
-            r"xrunner tag OTHER/coala-runtime-python:latest coala-runtime-python:latest")
+            r"xcrunner pull OTHER/coala-runtime-python:latest && "
+            r"xcrunner tag OTHER/coala-runtime-python:latest coala-runtime-python:latest")
 
 
 def test_docker_hub_manifest_401_explains_local_names(home, hub):
@@ -140,7 +140,7 @@ def test_docker_hub_token_failure_explains_local_names(home, hub, status):
 
 def test_docker_hub_user_repo_hint_keeps_the_namespace(home, hub):
     ref = Reference("docker.io", "someone/tool", "v1")
-    with pytest.raises(PullError, match=r"xrunner tag OTHER/tool:v1 someone/tool:v1"):
+    with pytest.raises(PullError, match=r"xcrunner tag OTHER/tool:v1 someone/tool:v1"):
         RegistryClient(home, scheme="http").fetch(ref, Platform())
 
 

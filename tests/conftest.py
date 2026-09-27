@@ -41,8 +41,8 @@ def home(tmp_path: Path, monkeypatch) -> RuntimeHome:
     """A fresh runtime home under tmp_path. Also exported via env for subprocesses."""
     root = tmp_path / "runtime-home"
     monkeypatch.setenv("XCODON_RUNTIME_HOME", str(root))
-    monkeypatch.delenv("XRUNNER_CONTAINER_DIR", raising=False)
-    monkeypatch.delenv("XRUNNER_ENV_LAYER_DIR", raising=False)
+    monkeypatch.delenv("XCRUNNER_CONTAINER_DIR", raising=False)
+    monkeypatch.delenv("XCRUNNER_ENV_LAYER_DIR", raising=False)
     return RuntimeHome(root)
 
 
@@ -187,8 +187,8 @@ def mac(home, tmp_path, monkeypatch):
     monkeypatch.setenv("LIMA_HOME", str(fakes["lima_home"]))
     monkeypatch.setenv("FAKE_LIMA_STATE", str(fakes["state"]))
     monkeypatch.setenv("FAKE_VM_HOME", str(fakes["vm_home"]))
-    for name in ("XRUNNER_MACHINE_NAME", "XRUNNER_MACHINE_CPUS", "XRUNNER_MACHINE_MEMORY",
-                 "XRUNNER_MACHINE_DISK", "XRUNNER_MACHINE_MOUNTS"):
+    for name in ("XCRUNNER_MACHINE_NAME", "XCRUNNER_MACHINE_CPUS", "XCRUNNER_MACHINE_MEMORY",
+                 "XCRUNNER_MACHINE_DISK", "XCRUNNER_MACHINE_MOUNTS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(macvm, "check_host", lambda: None)
     if not Path("/private/tmp").is_dir():

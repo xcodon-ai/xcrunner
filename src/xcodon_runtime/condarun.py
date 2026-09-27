@@ -1,8 +1,8 @@
 # src/xcodon_runtime/condarun.py
-"""`xrunner conda run`: run a command inside a conda env. See spec section 12.5.
+"""`xcrunner conda run`: run a command inside a conda env. See spec section 12.5.
 
 micromamba 2.9.0's own `run` fails on this host (`exec: --: invalid option` from
-its wrapper script), so xrunner activates the env itself and replaces its own
+its wrapper script), so xcrunner activates the env itself and replaces its own
 process with the command. Arguments, stdin, stdout and the exit code are the
 command's own.
 """
@@ -27,14 +27,14 @@ _HELP_OPTS = frozenset({"-h", "--help"})
 
 RUN_USAGE = """usage: conda run [-n NAME | -p PATH] [-r ROOT] [--cwd DIR] COMMAND [ARG...]
 
-Runs COMMAND inside the conda environment: xrunner activates the environment
+Runs COMMAND inside the conda environment: xcrunner activates the environment
 itself and execs COMMAND, replacing this process. COMMAND's exit status,
 stdout, stderr and stdin are used as-is.
 """
 
 
 class RunUsageError(ValueError):
-    """A `conda run` command line xrunner cannot accept."""
+    """A `conda run` command line xcrunner cannot accept."""
 
 
 @dataclass
@@ -177,9 +177,9 @@ def run_main(argv: Sequence[str], home: RuntimeHome, cwd: Path, environ: Mapping
     try:
         os.execvpe(argv_exec[0], argv_exec, env)
     except FileNotFoundError:
-        print(f"xrunner: {a.command[0]}: command not found", file=err)
+        print(f"xcrunner: {a.command[0]}: command not found", file=err)
         return 127
     except PermissionError:
-        print(f"xrunner: {a.command[0]}: permission denied", file=err)
+        print(f"xcrunner: {a.command[0]}: permission denied", file=err)
         return 126
     return 1  # not reached: execvpe only returns by raising

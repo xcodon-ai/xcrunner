@@ -1,11 +1,11 @@
-"""Make a project an xrunner sandbox for an agent. See spec section 14.
+"""Make a project an xcrunner sandbox for an agent. See spec section 14.
 
 ``activate(env_dir)`` writes ``docker``, ``conda``, ``mamba`` and ``micromamba``
 shims into ``<env_dir>/bin``, makes sure the pinned micromamba is present, and
 returns the two environment variables that route an agent's tools through
-xrunner: ``PATH`` with that ``bin`` folder first, and ``XRUNNER_ENV_DIR``. The
+xcrunner: ``PATH`` with that ``bin`` folder first, and ``XCRUNNER_ENV_DIR``. The
 caller applies them to its own process, so every command it starts inherits
-them. Nothing outside the env folder and the xrunner home is written.
+them. Nothing outside the env folder and the xcrunner home is written.
 """
 
 from __future__ import annotations
@@ -50,12 +50,12 @@ def _ensure_micromamba(home: RuntimeHome, environ: Mapping[str, str]) -> None:
         install_micromamba(home)
     except XcodonError as e:
         log.warning("could not install micromamba for the conda shim: %s; conda commands will fail "
-                    "until `xrunner shim install conda` succeeds", e)
+                    "until `xcrunner shim install conda` succeeds", e)
 
 
 def activate(env_dir: str | os.PathLike, home: RuntimeHome | None = None,
              environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Write the project's shims and return ``{"PATH": ..., "XRUNNER_ENV_DIR": ...}`` to apply.
+    """Write the project's shims and return ``{"PATH": ..., "XCRUNNER_ENV_DIR": ...}`` to apply.
 
     ``env_dir`` is the project's env folder, an absolute path. Calling this again is
     safe: the shims are rewritten and the returned PATH lists the shim folder once,

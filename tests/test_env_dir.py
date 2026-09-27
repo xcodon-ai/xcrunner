@@ -201,7 +201,7 @@ def test_env_lock_wait_names_the_holder(tmp_path, caplog):
     waits = [r for r in caplog.records if r.levelno == logging.WARNING and "waiting for env layer" in r.getMessage()]
     assert len(waits) == 1
     assert "container abc123def456 holds it" in waits[0].getMessage()
-    assert "xrunner stop abc123def456" in waits[0].getMessage()
+    assert "xcrunner stop abc123def456" in waits[0].getMessage()
     assert (layer / ENV_HOLDER_NAME).read_text().strip() == "fedcba654321"
 
 

@@ -24,13 +24,13 @@ def pyimage(home, busybox_rootfs):
 @pytest.fixture
 def project(tmp_path):
     proj = tmp_path / "proj"
-    (proj / ".xrunner-env").mkdir(parents=True)
-    (proj / ".xrunner-env").chmod(0o755)
+    (proj / ".xcrunner-env").mkdir(parents=True)
+    (proj / ".xcrunner-env").chmod(0o755)
     return proj
 
 
 def test_container_stop_records_real_layer_changes(home, pyimage, engine_name, project):
-    env_dir = project / ".xrunner-env"
+    env_dir = project / ".xcrunner-env"
     rt = Runtime(home.path, engine=engine_name)
     c = rt.create("xcodon-test/py:latest", env_dir=env_dir)
     try:
@@ -48,7 +48,7 @@ def test_container_stop_records_real_layer_changes(home, pyimage, engine_name, p
 
 
 def test_run_rm_records_too(home, pyimage, engine_name, project):
-    env_dir = project / ".xrunner-env"
+    env_dir = project / ".xcrunner-env"
     rt = Runtime(home.path, engine=engine_name)
     script = (f"mkdir -p /{SP}/x-1.dist-info && echo 'Name: x' > /{SP}/x-1.dist-info/METADATA && "
               f"echo 'Version: 1' >> /{SP}/x-1.dist-info/METADATA")  # the busybox fixture has no printf applet
@@ -57,7 +57,7 @@ def test_run_rm_records_too(home, pyimage, engine_name, project):
 
 
 def test_record_failures_never_break_a_run(home, pyimage, engine_name, project, monkeypatch, caplog):
-    env_dir = project / ".xrunner-env"
+    env_dir = project / ".xcrunner-env"
     monkeypatch.setattr(envrecord, "record_layer", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     rt = Runtime(home.path, engine=engine_name)
     assert rt.run("xcodon-test/py:latest", command=["/bin/true"], rm=True, env_dir=env_dir) == 0
@@ -66,19 +66,19 @@ def test_record_failures_never_break_a_run(home, pyimage, engine_name, project, 
 
 def test_conda_changes_update_the_record(home, project, tmp_path):
     mm = make_fake_micromamba(tmp_path / "fakebin")
-    environ = {"PATH": "/usr/bin:/bin", "XRUNNER_MICROMAMBA": str(mm), "HOME": str(tmp_path / "u")}
+    environ = {"PATH": "/usr/bin:/bin", "XCRUNNER_MICROMAMBA": str(mm), "HOME": str(tmp_path / "u")}
     assert conda_main(["create", "-n", "tools", "x"], home, cwd=project, environ=environ, err=io.StringIO()) == 0
-    doc = envrecord.load(project / ".xrunner-env")
-    assert doc["conda"]["name:tools"]["explicit"] == ".xrunner-env/conda/envs/tools/conda-explicit.txt"
+    doc = envrecord.load(project / ".xcrunner-env")
+    assert doc["conda"]["name:tools"]["explicit"] == ".xcrunner-env/conda/envs/tools/conda-explicit.txt"
     assert doc["conda"]["name:tools"]["packages"] == 1
 
 
 def test_cli_env_record_and_show(home, pyimage, project, monkeypatch, capfd):
-    env_dir = project / ".xrunner-env"
+    env_dir = project / ".xcrunner-env"
     (env_dir / pyimage.id / "upper").mkdir(parents=True)
     (env_dir / pyimage.id / "image.json").write_text(json.dumps(
         {"image_ref": "xcodon-test/py:latest", "image_id": pyimage.id, "engine": "ns", "first_used": "t"}))
-    monkeypatch.chdir(project / ".xrunner-env")
+    monkeypatch.chdir(project / ".xcrunner-env")
     assert cli.main(["env", "record"]) == 0
     assert capfd.readouterr().out.strip() == str(env_dir / "environment.json")
     assert cli.main(["env", "show"]) == 0
@@ -86,7 +86,7 @@ def test_cli_env_record_and_show(home, pyimage, project, monkeypatch, capfd):
     assert cli.main(["env", "show", "--json", "--env-dir", str(env_dir)]) == 0
     assert json.loads(capfd.readouterr().out)["version"] == 1
     monkeypatch.chdir(Path("/"))
-    monkeypatch.delenv("XRUNNER_ENV_DIR", raising=False)
+    monkeypatch.delenv("XCRUNNER_ENV_DIR", raising=False)
     assert cli.main(["env", "show"]) == 125
     assert "--env-dir" in capfd.readouterr().err
 
@@ -97,7 +97,7 @@ def test_cli_env_record_and_show(home, pyimage, project, monkeypatch, capfd):
 def test_a_fifo_made_in_the_container_never_hangs_the_record(home, pyimage, engine_name, project):
     from tests.test_pkgscan import _bounded, _release
 
-    env_dir = project / ".xrunner-env"
+    env_dir = project / ".xcrunner-env"
     rt = Runtime(home.path, engine=engine_name)
     script = (f"mkdir -p /{SP}/f-1.dist-info /opt/conda/conda-meta && mkfifo /{SP}/f-1.dist-info/METADATA && "
               f"mkfifo /opt/conda/conda-meta/x-1.json; exit 7")
@@ -115,7 +115,7 @@ def test_a_fifo_made_in_the_container_never_hangs_the_record(home, pyimage, engi
 
 
 def test_a_built_image_lists_its_built_in_packages(home, pyimage, engine_name, project, tmp_path):
-    env_dir = project / ".xrunner-env"
+    env_dir = project / ".xcrunner-env"
     rt = Runtime(home.path, engine=engine_name)
     ctx = tmp_path / "ctx"
     ctx.mkdir()
@@ -143,18 +143,18 @@ def test_a_built_image_lists_its_built_in_packages(home, pyimage, engine_name, p
 
 
 def test_cli_env_errors_exit_125_without_a_traceback(home, project, tmp_path, capfd):
-    missing = tmp_path / "no-such" / ".xrunner-env"
+    missing = tmp_path / "no-such" / ".xcrunner-env"
     assert cli.main(["env", "record", "--env-dir", str(missing)]) == 125
     err = capfd.readouterr().err
     assert "Traceback" not in err and str(missing) in err
-    env_dir = project / ".xrunner-env"
+    env_dir = project / ".xcrunner-env"
     (env_dir / "environment.json").mkdir()  # a directory where the file should be
     assert cli.main(["env", "show", "--json", "--env-dir", str(env_dir)]) == 125
     assert "Traceback" not in capfd.readouterr().err
 
 
 def test_cli_env_show_json_prints_the_file_itself(home, project, capfd):
-    env_dir = project / ".xrunner-env"
+    env_dir = project / ".xcrunner-env"
     assert cli.main(["env", "show", "--json", "--env-dir", str(env_dir)]) == 0
     assert json.loads(capfd.readouterr().out) == envrecord.empty()
     raw = '{"version": 1, "images": {}, "layers": {"ab": 1}, "conda": {}, "extra": [1,2]}\n'

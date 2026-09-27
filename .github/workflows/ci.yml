@@ -14,7 +14,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y busybox-static
       - run: pip install -e ".[dev,zstd]"
       - run: ruff check src tests
-      - run: xrunner info
+      - run: xcrunner info
       # cwltool is not installed in this job, so the cwltool-marked tests skip by design.
       - run: pytest -q -rs
       - run: XCODON_TEST_NETWORK=1 pytest -q -rs -m network
@@ -29,5 +29,5 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev,zstd]"
       - run: python -c "import xcodon_runtime.cli, xcodon_runtime.macvm, xcodon_runtime.forwarded"
-      - run: xrunner --version
+      - run: xcrunner --version
       - run: pytest -q -rs tests/test_macvm.py tests/test_macvm_forward.py tests/test_forwarded.py tests/test_micromamba_platforms.py

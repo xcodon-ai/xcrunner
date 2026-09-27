@@ -34,9 +34,9 @@ TOOLS = {
 def project(tmp_path, home):
     proj = tmp_path / "proj"
     (proj / "workspace").mkdir(parents=True)
-    make_env(proj / ".xrunner-env" / "conda" / "envs" / "tools", TOOLS)
-    # resolve_root skips a group- or world-writable .xrunner-env; do not depend on the umask.
-    (proj / ".xrunner-env").chmod(0o755)
+    make_env(proj / ".xcrunner-env" / "conda" / "envs" / "tools", TOOLS)
+    # resolve_root skips a group- or world-writable .xcrunner-env; do not depend on the umask.
+    (proj / ".xcrunner-env").chmod(0o755)
     return proj
 
 
@@ -80,7 +80,7 @@ def test_parse_run_args_help_flag():
 def test_arguments_and_activation_variables(project, env):
     r = _xr(["conda", "run", "-n", "tools", "echoargs", "a b", "$HOME", ">x"], project, env)
     assert r.returncode == 0, r.stderr
-    prefix = project / ".xrunner-env" / "conda" / "envs" / "tools"
+    prefix = project / ".xcrunner-env" / "conda" / "envs" / "tools"
     assert r.stdout.splitlines() == ["a b|$HOME|>x|", f"HOME=/home/tester PREFIX={prefix} ENV=tools LVL=1"]
     assert not (project / "x").exists()
 
@@ -89,11 +89,11 @@ def test_exit_code_stdin_and_path(project, env):
     assert _xr(["conda", "run", "-n", "tools", "rc"], project, env).returncode == 7
     assert _xr(["conda", "run", "-n", "tools", "catin"], project, env, stdin="hello\n").stdout == "hello\n"
     r = _xr(["conda", "run", "-n", "tools", "sh", "-c", "command -v echoargs"], project, env)
-    assert r.stdout.strip() == str(project / ".xrunner-env" / "conda" / "envs" / "tools" / "bin" / "echoargs")
+    assert r.stdout.strip() == str(project / ".xcrunner-env" / "conda" / "envs" / "tools" / "bin" / "echoargs")
 
 
 def test_activate_d_scripts_are_sourced(project, env):
-    d = project / ".xrunner-env" / "conda" / "envs" / "tools" / "etc" / "conda" / "activate.d"
+    d = project / ".xcrunner-env" / "conda" / "envs" / "tools" / "etc" / "conda" / "activate.d"
     d.mkdir(parents=True)
     (d / "java.sh").write_text("export FROM_ACTIVATE=yes\n")
     r = _xr(["conda", "run", "-n", "tools", "sh", "-c", "echo $FROM_ACTIVATE"], project, env)
@@ -133,16 +133,16 @@ def test_env_in_the_home_root_is_found(project, env, home):
 
 
 def test_base_env_is_the_root(project, env):
-    make_env(project / ".xrunner-env" / "conda", {"basetool": "echo base"})
+    make_env(project / ".xcrunner-env" / "conda", {"basetool": "echo base"})
     assert _xr(["conda", "run", "basetool"], project, env).stdout == "base\n"
 
 
 def test_run_ensures_a_fresh_root_is_a_valid_base_env(project, env):
-    """A fresh project has `.xrunner-env` but no conda-meta at the root itself (only
+    """A fresh project has `.xcrunner-env` but no conda-meta at the root itself (only
     the `tools` env the fixture builds has it). `conda run` with no -n/-p targets the
-    root as the base env, which real conda's own root always is; xrunner must make
+    root as the base env, which real conda's own root always is; xcrunner must make
     that true here too instead of reporting a missing environment."""
-    root = project / ".xrunner-env" / "conda"
+    root = project / ".xcrunner-env" / "conda"
     assert not (root / "conda-meta").is_dir()
     r = _xr(["conda", "run", "sh", "-c", "echo hi"], project, env)
     assert r.returncode == 0, r.stderr
@@ -222,7 +222,7 @@ def test_relative_prefix_without_a_slash_is_a_folder_in_cwd(project, env):
 def test_activate_d_scripts_are_sourced_with_bash(project, env):
     """Real conda on Linux sources activate.d with bash, and packages rely on it;
     /bin/sh (dash on Debian and Ubuntu) rejects bash-only syntax such as arrays."""
-    d = project / ".xrunner-env" / "conda" / "envs" / "tools" / "etc" / "conda" / "activate.d"
+    d = project / ".xcrunner-env" / "conda" / "envs" / "tools" / "etc" / "conda" / "activate.d"
     d.mkdir(parents=True)
     (d / "arr.sh").write_text("arr=(a b)\nexport FROM_BASH=${arr[1]}\n")
     r = _xr(["conda", "run", "-n", "tools", "sh", "-c", "echo $FROM_BASH"], project, env)

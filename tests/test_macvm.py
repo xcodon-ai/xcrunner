@@ -23,18 +23,18 @@ def _machine(env=None):
 
 
 def test_settings_defaults_and_parsing():
-    assert MachineSettings.from_env({}) == MachineSettings("xrunner", 4, "4GiB", "100GiB", ())
-    s = MachineSettings.from_env({"XRUNNER_MACHINE_NAME": "dev", "XRUNNER_MACHINE_CPUS": "8",
-                                  "XRUNNER_MACHINE_MEMORY": "16GiB", "XRUNNER_MACHINE_DISK": "200GiB",
-                                  "XRUNNER_MACHINE_MOUNTS": "/Volumes/data:/opt/ref/"})
+    assert MachineSettings.from_env({}) == MachineSettings("xcrunner", 4, "4GiB", "100GiB", ())
+    s = MachineSettings.from_env({"XCRUNNER_MACHINE_NAME": "dev", "XCRUNNER_MACHINE_CPUS": "8",
+                                  "XCRUNNER_MACHINE_MEMORY": "16GiB", "XCRUNNER_MACHINE_DISK": "200GiB",
+                                  "XCRUNNER_MACHINE_MOUNTS": "/Volumes/data:/opt/ref/"})
     assert s == MachineSettings("dev", 8, "16GiB", "200GiB", ("/Volumes/data", "/opt/ref"))
 
 
 @pytest.mark.parametrize("env,match", [
-    ({"XRUNNER_MACHINE_CPUS": "0"}, "XRUNNER_MACHINE_CPUS"),
-    ({"XRUNNER_MACHINE_CPUS": "many"}, "XRUNNER_MACHINE_CPUS"),
-    ({"XRUNNER_MACHINE_MOUNTS": "relative/dir"}, "absolute"),
-    ({"XRUNNER_MACHINE_NAME": "a b"}, "XRUNNER_MACHINE_NAME"),
+    ({"XCRUNNER_MACHINE_CPUS": "0"}, "XCRUNNER_MACHINE_CPUS"),
+    ({"XCRUNNER_MACHINE_CPUS": "many"}, "XCRUNNER_MACHINE_CPUS"),
+    ({"XCRUNNER_MACHINE_MOUNTS": "relative/dir"}, "absolute"),
+    ({"XCRUNNER_MACHINE_NAME": "a b"}, "XCRUNNER_MACHINE_NAME"),
 ])
 def test_bad_settings_are_refused(env, match):
     with pytest.raises(XcodonError, match=match):
@@ -112,10 +112,10 @@ def test_first_use_creates_starts_and_installs(mac):
     installs = [a for a in log(mac["state"], "ssh") if "pip install" in a[-1]]
     assert len(installs) == 1
     source = macvm.install_source()
-    assert (f"{source}[zstd]" if source else f"xc-xrunner[zstd]=={__version__}") in installs[0][-1]
-    record = json.loads((mac["lima_home"] / "xrunner" / macvm.INSTALL_RECORD).read_text())
+    assert (f"{source}[zstd]" if source else f"xcrunner[zstd]=={__version__}") in installs[0][-1]
+    record = json.loads((mac["lima_home"] / "xcrunner" / macvm.INSTALL_RECORD).read_text())
     assert record == {"version": __version__, "source": source or "pypi"}
-    yaml_text = (mac["lima_home"] / "xrunner" / "lima.yaml").read_text()
+    yaml_text = (mac["lima_home"] / "xcrunner" / "lima.yaml").read_text()
     assert f'- location: "{mac["mac_home"]}"' in yaml_text
 
 
@@ -130,7 +130,7 @@ def test_a_ready_vm_costs_no_install(mac):
 def test_a_changed_record_reinstalls(mac):
     m = _machine()
     m.ensure_ready(io.StringIO())
-    (mac["lima_home"] / "xrunner" / macvm.INSTALL_RECORD).write_text(json.dumps({"version": "0.0.1"}))
+    (mac["lima_home"] / "xcrunner" / macvm.INSTALL_RECORD).write_text(json.dumps({"version": "0.0.1"}))
     m.ensure_ready(io.StringIO())
     assert len([a for a in log(mac["state"], "ssh") if "pip install" in a[-1]]) == 2
 
@@ -149,15 +149,15 @@ def test_a_failed_start_shows_limas_log_and_the_rosetta_hint(mac, monkeypatch):
     with pytest.raises(XcodonError) as e:
         _machine().ensure_ready(io.StringIO())
     msg = str(e.value)
-    assert "`limactl start xrunner` failed with exit code 1" in msg
+    assert "`limactl start xcrunner` failed with exit code 1" in msg
     assert "rosetta is not installed" in msg and "softwareupdate --install-rosetta" in msg
 
 
 def test_a_failed_install_shows_pip_output(mac, monkeypatch):
     monkeypatch.setenv("FAKE_SSH_PIP_EXIT", "1")
-    with pytest.raises(XcodonError, match="could not install xrunner in the VM"):
+    with pytest.raises(XcodonError, match="could not install xcrunner in the VM"):
         _machine().ensure_ready(io.StringIO())
-    assert not (mac["lima_home"] / "xrunner" / macvm.INSTALL_RECORD).exists()
+    assert not (mac["lima_home"] / "xcrunner" / macvm.INSTALL_RECORD).exists()
 
 
 def test_status_absent_and_running(mac):
@@ -166,12 +166,12 @@ def test_status_absent_and_running(mac):
     out = io.StringIO()
     assert machine_main(["status"], dict(os.environ), out, io.StringIO()) == 0
     doc = json.loads(out.getvalue())
-    assert doc["status"] == "absent" and doc["vm_xrunner"] is None and doc["mac_xrunner"] == __version__
+    assert doc["status"] == "absent" and doc["vm_xcrunner"] is None and doc["mac_xcrunner"] == __version__
     machine_main(["start"], dict(os.environ), io.StringIO(), io.StringIO())
     out = io.StringIO()
     machine_main(["status"], dict(os.environ), out, io.StringIO())
     doc = json.loads(out.getvalue())
-    assert doc["status"] == "Running" and doc["vm_xrunner"] == __version__ and doc["cpus"] == 4
+    assert doc["status"] == "Running" and doc["vm_xcrunner"] == __version__ and doc["cpus"] == 4
     assert doc["shared_folders"] == [str(mac["mac_home"]), "/private/var/folders", "/private/tmp"]
 
 
@@ -186,13 +186,13 @@ def test_stop_and_rm(mac):
     env = dict(os.environ)
     machine_main(["start"], env, io.StringIO(), io.StringIO())
     assert machine_main(["stop"], env, io.StringIO(), io.StringIO()) == 0
-    assert instances(mac["state"])["xrunner"]["status"] == "Stopped"
+    assert instances(mac["state"])["xcrunner"]["status"] == "Stopped"
     with pytest.raises(XcodonError, match="pass -f"):
         machine_main(["rm"], env, io.StringIO(), io.StringIO(), stdin=io.StringIO(""))
     assert machine_main(["rm"], env, io.StringIO(), io.StringIO(), stdin=_Tty("n\n")) == 1
-    assert "xrunner" in instances(mac["state"])
+    assert "xcrunner" in instances(mac["state"])
     assert machine_main(["rm"], env, io.StringIO(), io.StringIO(), stdin=_Tty("y\n")) == 0
-    assert "xrunner" not in instances(mac["state"])
+    assert "xcrunner" not in instances(mac["state"])
     machine_main(["start"], env, io.StringIO(), io.StringIO())
     assert machine_main(["rm", "-f"], env, io.StringIO(), io.StringIO()) == 0
     assert instances(mac["state"]) == {}

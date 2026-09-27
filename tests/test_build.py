@@ -119,7 +119,7 @@ def test_add_from_url_is_rejected(rt, tmp_path):
         rt.build(ctx)
 
 
-# -- RUN/CMD/ENTRYPOINT are verbatim; the shell (not xrunner) resolves $VARS --
+# -- RUN/CMD/ENTRYPOINT are verbatim; the shell (not xcrunner) resolves $VARS --
 
 def test_run_is_not_expanded_shell_handles_its_own_vars(rt, tmp_path):
     ctx = tmp_path / "ctx-run-verbatim"

@@ -1,5 +1,5 @@
 # src/xcodon_runtime/condaroot.py
-"""Which conda root prefix a `xrunner conda` call uses. See spec section 12.3."""
+"""Which conda root prefix a `xcrunner conda` call uses. See spec section 12.3."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from typing import Mapping
 from xcodon_runtime.errors import XcodonError
 from xcodon_runtime.home import RuntimeHome
 
-ENV_DIR_VAR = "XRUNNER_ENV_DIR"
-ENV_FOLDER_NAME = ".xrunner-env"
+ENV_DIR_VAR = "XCRUNNER_ENV_DIR"
+ENV_FOLDER_NAME = ".xcrunner-env"
 ROOT_DIRNAME = "conda"
 
 
@@ -58,13 +58,13 @@ def opt_value(tokens: list[str], i: int) -> tuple[str | None, int]:
 def abs_prefix(value: str, cwd: Path) -> Path:
     """A `-p/--prefix` value as an absolute path: a relative one is taken from cwd.
     micromamba 2.9.0 reads a relative value with no `/` as an env name
-    (`<root>/envs/NAME`), so xrunner always hands it this absolute path."""
+    (`<root>/envs/NAME`), so xcrunner always hands it this absolute path."""
     p = Path(value)
     return p if p.is_absolute() else cwd / p
 
 
 def _trusted_env_folder(d: Path) -> bool:
-    """A found `.xrunner-env` is used only when its resolved directory is ours
+    """A found `.xcrunner-env` is used only when its resolved directory is ours
     and no one else can write to it. In a shared parent such as /tmp, another
     user's folder would otherwise make `conda run` exec their binaries."""
     try:
@@ -86,7 +86,7 @@ def _find_env_folder_with_source(cwd: Path, environ: Mapping[str, str]) -> tuple
 
 
 def find_env_folder(cwd: Path, environ: Mapping[str, str]) -> Path | None:
-    """XRUNNER_ENV_DIR, else the nearest trusted .xrunner-env above cwd, else None."""
+    """XCRUNNER_ENV_DIR, else the nearest trusted .xcrunner-env above cwd, else None."""
     found = _find_env_folder_with_source(cwd, environ)
     return found[0] if found else None
 

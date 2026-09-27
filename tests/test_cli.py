@@ -72,7 +72,7 @@ def test_runtime_error_exit_125(home, capsys):
     assert code == 2
     code = cli.main(["--engine", "proot", "start", "nosuchcontainer"])
     assert code == 125
-    assert "xrunner:" in capsys.readouterr().err
+    assert "xcrunner:" in capsys.readouterr().err
 
 
 def test_inspect_missing_image_prints_empty_array(home, capsys):
@@ -136,7 +136,7 @@ def test_exec_dash_e_without_value_copies_host_env(home, busybox_image, engine_n
 def test_create_cidfile_error_exit_125(home, busybox_image, capsys):
     code = cli.main(["create", "--cidfile=/nonexistent/dir/cid", "xcodon-test/busybox:latest"])
     assert code == 125
-    assert "xrunner:" in capsys.readouterr().err
+    assert "xcrunner:" in capsys.readouterr().err
 
 
 def test_verbosity_resets_between_invocations(home, capsys):
@@ -153,10 +153,10 @@ def test_console_script_entry_point():
     assert r.returncode == 0 and "pull" in r.stdout
 
 
-def test_xrunner_console_script():
-    """The console script is `xrunner`; the `xcodon` name belongs to the agent."""
-    exe = os.path.join(os.path.dirname(sys.executable), "xrunner")
-    assert os.path.exists(exe), "install the package so the xrunner script exists"
+def test_xcrunner_console_script():
+    """The console script is `xcrunner`; the `xcodon` name belongs to the agent."""
+    exe = os.path.join(os.path.dirname(sys.executable), "xcrunner")
+    assert os.path.exists(exe), "install the package so the xcrunner script exists"
     r = subprocess.run([exe, "--version"], capture_output=True, text=True)
     assert r.returncode == 0
     assert __version__ in r.stdout
@@ -188,12 +188,12 @@ def test_mount_readonly_false_is_writable():
 def test_bad_reference_exits_125_without_a_traceback(home, capsys):
     """cwltool passes user-typed dockerPull strings; a bare ValueError escaped main()."""
     assert cli.main(["pull", "BAD REF!!"]) == 125
-    assert "xrunner:" in capsys.readouterr().err
+    assert "xcrunner:" in capsys.readouterr().err
 
 
 def test_bad_platform_exits_125(home, capsys):
     assert cli.main(["pull", "--platform", "junk", "busybox"]) == 125
-    assert "xrunner:" in capsys.readouterr().err
+    assert "xcrunner:" in capsys.readouterr().err
 
 
 def test_logs_on_a_proot_container_explains_there_is_none(home, busybox_image, capfd):
@@ -251,4 +251,4 @@ def test_rmi_reports_untagged_and_deleted(home, busybox_image, capfd):
     out = capfd.readouterr().out.splitlines()
     assert out == ["Untagged: docker.io/xcodon-test/busybox:latest", f"Deleted: sha256:{busybox_image.id}"]
     assert cli_mod.main(["rmi", "xcodon-test/busybox"]) == 125
-    assert "run: xrunner pull" in capfd.readouterr().err
+    assert "run: xcrunner pull" in capfd.readouterr().err

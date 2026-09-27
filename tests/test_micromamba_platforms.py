@@ -70,8 +70,8 @@ def test_an_unsupported_host_names_the_supported_ones(home, monkeypatch):
 def conda_env(tmp_path):
     fake = make_fake_micromamba(tmp_path / "fakebin")
     proj = tmp_path / "proj"
-    (proj / ".xrunner-env").mkdir(parents=True)
-    return proj, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-user-home", "XRUNNER_MICROMAMBA": str(fake),
+    (proj / ".xcrunner-env").mkdir(parents=True)
+    return proj, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-user-home", "XCRUNNER_MICROMAMBA": str(fake),
                   "FAKE_MM_LOG": str(tmp_path / "mm.log")}
 
 

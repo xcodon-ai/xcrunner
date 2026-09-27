@@ -1,4 +1,4 @@
-"""xrunner on macOS: one Lima VM runs the Linux xrunner. See spec section 16.
+"""xcrunner on macOS: one Lima VM runs the Linux xcrunner. See spec section 16.
 
 On macOS, ``cli.main`` hands every call to :func:`mac_main`. A few subcommands
 run on the Mac itself (``conda``, ``shim``, ``sandbox``, ``machine``, and
@@ -29,18 +29,18 @@ from xcodon_runtime.errors import XcodonError
 EXIT_ERROR = 125
 MIN_LIMA = (2, 0, 0)
 MIN_MACOS = 26
-DEFAULT_NAME = "xrunner"
+DEFAULT_NAME = "xcrunner"
 # Relative to the VM user's home, where SSH starts a remote command.
-VM_VENV = ".xrunner-vm/venv"
+VM_VENV = ".xcrunner-vm/venv"
 VM_PYTHON = f"{VM_VENV}/bin/python"
-INSTALL_RECORD = "xrunner-installed.json"
+INSTALL_RECORD = "xcrunner-installed.json"
 MAC_TEMP_FOLDERS = ("/private/var/folders", "/private/tmp")
 LOCAL_COMMANDS = frozenset({"conda", "shim", "sandbox"})
 # The settings a forwarded command takes along. The VM keeps its own runtime home
 # and container folder.
-PASSED_SETTINGS = ("XRUNNER_ENV_DIR", "XRUNNER_ENV_LAYER_DIR", "XCODON_ENGINE", "XCODON_LOG",
+PASSED_SETTINGS = ("XCRUNNER_ENV_DIR", "XCRUNNER_ENV_LAYER_DIR", "XCODON_ENGINE", "XCODON_LOG",
                    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
-LIMA_MISSING = "xrunner on macOS needs Lima 2.0 or newer: brew install lima"
+LIMA_MISSING = "xcrunner on macOS needs Lima 2.0 or newer: brew install lima"
 SSH_FAILED = 255
 _TAIL_LINES = 30
 
@@ -68,22 +68,22 @@ class MachineSettings:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str]) -> "MachineSettings":
-        name = environ.get("XRUNNER_MACHINE_NAME") or DEFAULT_NAME
+        name = environ.get("XCRUNNER_MACHINE_NAME") or DEFAULT_NAME
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
-            raise XcodonError(f"XRUNNER_MACHINE_NAME={name!r} must be letters, digits, '-' or '_'")
-        cpus_text = environ.get("XRUNNER_MACHINE_CPUS") or "4"
+            raise XcodonError(f"XCRUNNER_MACHINE_NAME={name!r} must be letters, digits, '-' or '_'")
+        cpus_text = environ.get("XCRUNNER_MACHINE_CPUS") or "4"
         try:
             cpus = int(cpus_text)
         except ValueError:
             cpus = 0
         if cpus < 1:
-            raise XcodonError(f"XRUNNER_MACHINE_CPUS={cpus_text!r} must be a whole number of CPUs")
-        mounts = tuple(m for m in (environ.get("XRUNNER_MACHINE_MOUNTS") or "").split(":") if m)
+            raise XcodonError(f"XCRUNNER_MACHINE_CPUS={cpus_text!r} must be a whole number of CPUs")
+        mounts = tuple(m for m in (environ.get("XCRUNNER_MACHINE_MOUNTS") or "").split(":") if m)
         for m in mounts:
             if not os.path.isabs(m):
-                raise XcodonError(f"XRUNNER_MACHINE_MOUNTS folder {m!r} must be an absolute path")
-        return cls(name, cpus, environ.get("XRUNNER_MACHINE_MEMORY") or "4GiB",
-                   environ.get("XRUNNER_MACHINE_DISK") or "100GiB", tuple(m.rstrip("/") or "/" for m in mounts))
+                raise XcodonError(f"XCRUNNER_MACHINE_MOUNTS folder {m!r} must be an absolute path")
+        return cls(name, cpus, environ.get("XCRUNNER_MACHINE_MEMORY") or "4GiB",
+                   environ.get("XCRUNNER_MACHINE_DISK") or "100GiB", tuple(m.rstrip("/") or "/" for m in mounts))
 
 
 def check_host() -> None:
@@ -93,7 +93,7 @@ def check_host() -> None:
     except ValueError:
         major = 0
     if platform.machine() != "arm64" or major < MIN_MACOS:
-        raise XcodonError(f"xrunner on macOS supports Apple silicon with macOS {MIN_MACOS} or newer; "
+        raise XcodonError(f"xcrunner on macOS supports Apple silicon with macOS {MIN_MACOS} or newer; "
                           f"this Mac is {platform.machine()} with macOS {version or 'unknown'}")
 
 
@@ -115,7 +115,7 @@ def lima_version(limactl: str) -> str:
 
 
 def install_source() -> str | None:
-    """The checkout path when this xrunner is an editable install of a source tree, else None (PyPI)."""
+    """The checkout path when this xcrunner is an editable install of a source tree, else None (PyPI)."""
     pkg = Path(__file__).resolve().parent
     repo = pkg.parent.parent
     if pkg.parent.name == "src" and (repo / "pyproject.toml").is_file():
@@ -134,10 +134,10 @@ def shared_folders(settings: MachineSettings, home: Path) -> list[str]:
 
 
 def lima_yaml(settings: MachineSettings, home: Path, checkout: str | None) -> str:
-    """The Lima config for the xrunner VM (spec 16.3)."""
+    """The Lima config for the xcrunner VM (spec 16.3)."""
     q = json.dumps
     lines = [
-        "# Written by xrunner (spec 16.3). Changing it needs `xrunner machine rm` and a new start.",
+        "# Written by xcrunner (spec 16.3). Changing it needs `xcrunner machine rm` and a new start.",
         f"minimumLimaVersion: {q('.'.join(str(x) for x in MIN_LIMA))}",
         f"base: {q('template:ubuntu-24.04')}",
         'vmType: "vz"',
@@ -176,8 +176,8 @@ def lima_yaml(settings: MachineSettings, home: Path, checkout: str | None) -> st
 _SYSTEM_SCRIPT = """#!/bin/sh
 set -eu
 # The ns engine needs unprivileged user namespaces, which Ubuntu 24.04 restricts.
-printf 'kernel.apparmor_restrict_unprivileged_userns=0\\n' > /etc/sysctl.d/60-xrunner.conf
-sysctl -q -p /etc/sysctl.d/60-xrunner.conf || true
+printf 'kernel.apparmor_restrict_unprivileged_userns=0\\n' > /etc/sysctl.d/60-xcrunner.conf
+sysctl -q -p /etc/sysctl.d/60-xcrunner.conf || true
 # macOS hands out temp paths as both /var/folders/... and /private/var/folders/...
 [ -e /var/folders ] || ln -s /private/var/folders /var/folders
 if ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
@@ -300,14 +300,14 @@ class Machine:
 
     def install(self, err: TextIO) -> None:
         checkout = install_source()
-        pip_args = ["-e", f"{checkout}[zstd]"] if checkout else [f"xc-xrunner[zstd]=={__version__}"]
+        pip_args = ["-e", f"{checkout}[zstd]"] if checkout else [f"xcrunner[zstd]=={__version__}"]
         script = (f'set -e; [ -x {VM_PYTHON} ] || python3 -m venv {VM_VENV}; '
                   f'exec {VM_PYTHON} -m pip install -q --upgrade "$@"')
-        print(f"xrunner: installing xrunner {__version__} in the VM", file=err)
+        print(f"xcrunner: installing xcrunner {__version__} in the VM", file=err)
         r = subprocess.run(self.ssh_argv(shlex.join(["sh", "-c", script, "sh", *pip_args])),
                            capture_output=True, text=True)
         if r.returncode != 0:
-            raise XcodonError(f"could not install xrunner in the VM (exit code {r.returncode}); "
+            raise XcodonError(f"could not install xcrunner in the VM (exit code {r.returncode}); "
                               f"a PyPI install needs network access in the VM:\n{_tail(r.stdout + r.stderr)}")
         self._record_path().write_text(json.dumps(self.wanted_record(), indent=2) + "\n")
 
@@ -321,13 +321,13 @@ class Machine:
         """Create, start and install as needed. Returns the instance info."""
         info = self.info()
         if info is None:
-            print(f"xrunner: creating the {self.name} VM; the first start takes a few minutes", file=err)
+            print(f"xcrunner: creating the {self.name} VM; the first start takes a few minutes", file=err)
             self.create()
             info = self.info()
             if info is None:
                 raise XcodonError(f"`limactl create` finished but no VM named {self.name} exists")
         if info.get("status") != "Running":
-            print(f"xrunner: starting the {self.name} VM", file=err)
+            print(f"xcrunner: starting the {self.name} VM", file=err)
             self.start()
             info = self.info() or info
         if self.installed_record() != self.wanted_record() or (
@@ -349,14 +349,14 @@ class Machine:
             "settings": {"cpus": self.settings.cpus, "memory": self.settings.memory,
                          "disk": self.settings.disk, "mounts": list(self.settings.mounts)},
             "lima": self.lima_ver,
-            "mac_xrunner": __version__,
-            "vm_xrunner": record.get("version") if record else None,
+            "mac_xcrunner": __version__,
+            "vm_xcrunner": record.get("version") if record else None,
         }
 
 
-# -- `xrunner machine` ----------------------------------------------------------------
+# -- `xcrunner machine` ----------------------------------------------------------------
 
-MACHINE_USAGE = "usage: xrunner machine {start|stop|status|shell|rm [-f]}\n"
+MACHINE_USAGE = "usage: xcrunner machine {start|stop|status|shell|rm [-f]}\n"
 
 
 def machine_main(argv: Sequence[str], environ: Mapping[str, str], out: TextIO, err: TextIO,
@@ -371,7 +371,7 @@ def machine_main(argv: Sequence[str], environ: Mapping[str, str], out: TextIO, e
     m = Machine.from_env(environ)
     if verb == "start" and not rest:
         m.ensure_ready(err, check_version=True)
-        print(f"xrunner: the {m.name} VM is running", file=err)
+        print(f"xcrunner: the {m.name} VM is running", file=err)
         return 0
     if verb == "stop" and not rest:
         if m.info() is not None:
@@ -389,7 +389,7 @@ def machine_main(argv: Sequence[str], environ: Mapping[str, str], out: TextIO, e
         if not rest:
             stdin = sys.stdin if stdin is None else stdin
             if not stdin.isatty():
-                raise XcodonError("`xrunner machine rm` deletes the VM with all its images and env layers; "
+                raise XcodonError("`xcrunner machine rm` deletes the VM with all its images and env layers; "
                                   "pass -f to do it without a prompt")
             print(f"Delete the {m.name} VM with all its images and env layers? [y/N] ", end="", file=err, flush=True)
             if stdin.readline().strip().lower() not in ("y", "yes"):
@@ -586,9 +586,9 @@ def _check_cwd(m: Machine, cwd: str) -> None:
     checkout = install_source()
     folders = shared_folders(m.settings, m.home) + ([checkout] if checkout else [])
     if not any(_under(cwd, f) for f in folders):
-        raise XcodonError(f"{cwd} is not shared with the xrunner VM; it shares {', '.join(folders)}. "
-                          "Add folders with XRUNNER_MACHINE_MOUNTS, then run `xrunner machine rm` and "
-                          "`xrunner machine start`")
+        raise XcodonError(f"{cwd} is not shared with the xcrunner VM; it shares {', '.join(folders)}. "
+                          "Add folders with XCRUNNER_MACHINE_MOUNTS, then run `xcrunner machine rm` and "
+                          "`xcrunner machine start`")
 
 
 def run_forwarded(m: Machine, argv: Sequence[str], environ: Mapping[str, str], err: TextIO,
@@ -619,7 +619,7 @@ def run_forwarded(m: Machine, argv: Sequence[str], environ: Mapping[str, str], e
         for sig, handler in previous.items():
             signal.signal(sig, handler)
     if proc.returncode == SSH_FAILED:
-        raise XcodonError("cannot reach the xrunner VM; run `xrunner machine status`")
+        raise XcodonError("cannot reach the xcrunner VM; run `xcrunner machine status`")
     code = proc.returncode
     return (128 - code if code < 0 else code), output or b""
 
@@ -628,12 +628,12 @@ def _mac_info(m: Machine, globals_: list[str], environ: Mapping[str, str], out: 
     doc: dict = {"platform": "macos", "machine": m.status()}
     if doc["machine"]["status"] != "Running":
         # `info` reports; it does not create or start the VM.
-        doc["vm"] = {"error": "the xrunner VM is not running; start it with `xrunner machine start`"}
+        doc["vm"] = {"error": "the xcrunner VM is not running; start it with `xcrunner machine start`"}
         print(json.dumps(doc, indent=2), file=out)
         return 0
     try:
         code, output = run_forwarded(m, [*globals_, "info"], environ, err, capture=True)
-        doc["vm"] = json.loads(output) if code == 0 else {"error": f"`xrunner info` in the VM exited {code}"}
+        doc["vm"] = json.loads(output) if code == 0 else {"error": f"`xcrunner info` in the VM exited {code}"}
     except (XcodonError, ValueError) as e:
         doc["vm"] = {"error": str(e)}
     print(json.dumps(doc, indent=2), file=out)
@@ -655,7 +655,7 @@ def mac_main(argv: Sequence[str], local_main: Callable[[list[str]], int],
         if cmd == "machine":
             return machine_main(rest, environ, out, err)
         if any(g == "--home" or g.startswith("--home=") for g in globals_):
-            raise XcodonError("--home is not available on macOS for commands that run in the xrunner VM; "
+            raise XcodonError("--home is not available on macOS for commands that run in the xcrunner VM; "
                               "the VM keeps its own runtime home")
         m = Machine.from_env(environ)
         if cmd == "info":
@@ -663,7 +663,7 @@ def mac_main(argv: Sequence[str], local_main: Callable[[list[str]], int],
         code, _ = run_forwarded(m, argv, environ, err)
         return code
     except XcodonError as e:
-        print(f"xrunner: {e}", file=err)
+        print(f"xcrunner: {e}", file=err)
         return EXIT_ERROR
     except KeyboardInterrupt:
         return 130

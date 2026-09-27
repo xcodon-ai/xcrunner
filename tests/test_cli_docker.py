@@ -25,7 +25,7 @@ def test_translate_docker_argv():
 def test_translate_docker_argv_image_error_names_the_verb():
     """Regression: the message used to be `docker image ['prune']: ...` (a Python list
     repr), not the verb text."""
-    with pytest.raises(cli.UsageError, match=r"^docker image prune: not supported by xrunner$"):
+    with pytest.raises(cli.UsageError, match=r"^docker image prune: not supported by xcrunner$"):
         cli.translate_docker_argv(["image", "prune"])
 
 
@@ -211,7 +211,7 @@ def test_shim_install_force_onto_a_directory_is_a_clean_error(tmp_path, monkeypa
 
 
 def test_shim_install_refuses_real_docker_hidden_behind_a_stale_shim_on_path(tmp_path, monkeypatch):
-    """PATH is shim1:realbin, and shim1/docker is itself an old xrunner shim. The
+    """PATH is shim1:realbin, and shim1/docker is itself an old xcrunner shim. The
     resolver must keep walking PATH past it and find the real docker in realbin."""
     shim1 = tmp_path / "shim1"
     shim1.mkdir()

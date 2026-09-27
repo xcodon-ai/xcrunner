@@ -313,7 +313,7 @@ class Runtime:
                 else:
                     from xcodon_runtime.engine_proot import ProotEngine
                     source = ("rootfs", ProotEngine().rootfs_path(container))
-                created_by = message or f"xrunner commit {container.short_id}"
+                created_by = message or f"xcrunner commit {container.short_id}"
             elif env_dir is not None and image is not None:
                 base = self.images.require(image)
                 layer = env_layer_dir(str(env_dir), base.id)
@@ -322,7 +322,7 @@ class Runtime:
                 env_lock_fd = _lock_env_layer(layer)
                 binds = []  # unknown here; the keeper's fixed mounts are still dropped
                 source = ("upper", layer / "upper") if (layer / "upper").is_dir() else ("rootfs", layer / "rootfs")
-                created_by = message or f"xrunner commit --env-dir {env_dir}"
+                created_by = message or f"xcrunner commit --env-dir {env_dir}"
             else:
                 raise XcodonError("commit needs a container, or --env-dir together with the base image")
             kind, path = source

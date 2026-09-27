@@ -20,7 +20,7 @@ SCRATCH_PREFIXES = ("commit-", "copy-", "workdir-")
 # Where container folders live when not ``<home>/containers``. On a cluster the
 # home (images and layers) can sit on shared storage while this points at a
 # node-local disk, where overlay upper layers work. See spec section 15.
-CONTAINER_DIR_ENV = "XRUNNER_CONTAINER_DIR"
+CONTAINER_DIR_ENV = "XCRUNNER_CONTAINER_DIR"
 # Container locks live beside the containers they guard, not in the home.
 CONTAINER_LOCKS_NAME = ".locks"
 

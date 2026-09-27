@@ -21,17 +21,17 @@ def test_conda_shim_end_to_end(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     project = tmp_path / "project"
-    (project / ".xrunner-env").mkdir(parents=True)
-    (project / ".xrunner-env").chmod(0o755)
-    xrunner = Path(sys.executable).with_name("xrunner")
+    (project / ".xcrunner-env").mkdir(parents=True)
+    (project / ".xcrunner-env").chmod(0o755)
+    xcrunner = Path(sys.executable).with_name("xcrunner")
     env = {"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(user_home), "XCODON_RUNTIME_HOME": str(home)}
 
-    r = _run([str(xrunner), "shim", "install", "conda", "--dir", str(shim_dir)], tmp_path, {**env, "PATH": str(empty)})
+    r = _run([str(xcrunner), "shim", "install", "conda", "--dir", str(shim_dir)], tmp_path, {**env, "PATH": str(empty)})
     assert r.returncode == 0, r.stdout + r.stderr
 
     r = _run(["conda", "create", "-n", "bwa_env", "-c", "bioconda", "seqtk"], project, env)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
-    env_prefix = project / ".xrunner-env" / "conda" / "envs" / "bwa_env"
+    env_prefix = project / ".xcrunner-env" / "conda" / "envs" / "bwa_env"
     assert (env_prefix / "bin" / "seqtk").exists()
     assert "seqtk" in (env_prefix / "conda-explicit.txt").read_text()
 

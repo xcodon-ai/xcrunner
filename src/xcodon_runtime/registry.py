@@ -95,8 +95,8 @@ def _hub_not_found(ref: Reference) -> PullError:
     return PullError(
         f"image {ref.registry}/{ref.repository}:{tag} was not found on Docker Hub, or it needs a login; "
         f"if it is a local name, import it first, for example: "
-        f"xrunner pull OTHER/{short.rsplit('/', 1)[-1]}:{tag} && "
-        f"xrunner tag OTHER/{short.rsplit('/', 1)[-1]}:{tag} {short}:{tag}"
+        f"xcrunner pull OTHER/{short.rsplit('/', 1)[-1]}:{tag} && "
+        f"xcrunner tag OTHER/{short.rsplit('/', 1)[-1]}:{tag} {short}:{tag}"
     )
 
 

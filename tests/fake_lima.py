@@ -2,7 +2,7 @@
 
 The fake limactl keeps its instances in $FAKE_LIMA_STATE/instances.json and makes
 instance folders under $LIMA_HOME. The fake ssh runs the remote command locally
-with `sh -c`, in $FAKE_VM_HOME, where `.xrunner-vm/venv/bin/python` is this
+with `sh -c`, in $FAKE_VM_HOME, where `.xcrunner-vm/venv/bin/python` is this
 test's Python. So a forwarded command runs the real forwarded.py and CLI.
 """
 
@@ -95,7 +95,7 @@ def make_fakes(root: Path) -> dict[str, Path]:
     state = root / "state"
     state.mkdir()
     vm_home = root / "vm-home"
-    venv_bin = vm_home / ".xrunner-vm" / "venv" / "bin"
+    venv_bin = vm_home / ".xcrunner-vm" / "venv" / "bin"
     venv_bin.mkdir(parents=True)
     # A wrapper, not a link: a link to a venv's python loses the venv's packages.
     py = venv_bin / "python"

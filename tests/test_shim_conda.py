@@ -6,7 +6,7 @@ import pytest
 
 from tests.fake_micromamba import make_fake_micromamba
 from xcodon_runtime import cli
-from xcodon_runtime.shim import CONDA_MARKER, is_xrunner_shim, resolve_real
+from xcodon_runtime.shim import CONDA_MARKER, is_xcrunner_shim, resolve_real
 
 
 @pytest.fixture
@@ -30,15 +30,15 @@ def test_install_writes_three_forwarding_shims(home, tmp_path, fake_mm, empty_pa
         p = shim_dir / name
         text = p.read_text()
         assert text.startswith("#!/bin/sh\n") and CONDA_MARKER in text
-        assert text.rstrip().endswith('conda "$@"') and "xrunner" in text
-        assert os.access(p, os.X_OK) and is_xrunner_shim(p)
+        assert text.rstrip().endswith('conda "$@"') and "xcrunner" in text
+        assert os.access(p, os.X_OK) and is_xcrunner_shim(p)
         assert f"installed {p}" in out
     assert (home.path / "bin" / "micromamba-2.9.0" / "micromamba").read_bytes() == fake_mm.read_bytes()
     assert "add it to PATH" in out
     env = {"PATH": f"{shim_dir}:/usr/bin:/bin", "XCODON_RUNTIME_HOME": str(home.path), "HOME": str(tmp_path)}
     r = subprocess.run(["mamba", "--version"], env=env, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "conda 2.9.0 (micromamba via xrunner)\n"
+    assert r.stdout == "conda 2.9.0 (micromamba via xcrunner)\n"
 
 
 def test_install_refuses_a_real_conda_on_path(home, tmp_path, fake_mm, monkeypatch):
@@ -64,7 +64,7 @@ def test_install_never_writes_through_a_link_or_over_a_user_file(home, tmp_path,
     assert cli.main(args) == 125
     assert cli.main(args + ["--force"]) == 0
     assert target.read_text() == "#!/bin/sh\necho mine\n"
-    assert not (shim_dir / "conda").is_symlink() and is_xrunner_shim(shim_dir / "conda")
+    assert not (shim_dir / "conda").is_symlink() and is_xcrunner_shim(shim_dir / "conda")
     assert cli.main(args) == 0, "replacing its own shims needs no --force"
 
 

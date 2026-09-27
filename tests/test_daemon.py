@@ -131,12 +131,12 @@ def test_daemon_source_unavailable_when_missing(home):
 
 
 def test_daemon_source_unavailable_when_only_shim_on_path(home, tmp_path, monkeypatch):
-    """A `docker` that is really xrunner's own shim must never look "available":
-    otherwise xrunner would call itself for `docker version`/`docker save`."""
+    """A `docker` that is really xcrunner's own shim must never look "available":
+    otherwise xcrunner would call itself for `docker version`/`docker save`."""
     shim_dir = tmp_path / "shimonly"
     shim_dir.mkdir()
     shim = shim_dir / "docker"
-    shim.write_text("#!/bin/sh\n# docker shim installed by xrunner\nexit 1\n")
+    shim.write_text("#!/bin/sh\n# docker shim installed by xcrunner\nexit 1\n")
     shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", str(shim_dir))
 

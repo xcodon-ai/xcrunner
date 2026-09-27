@@ -101,13 +101,13 @@ def test_find_prefers_the_environment_variable(home, tmp_path):
     exe = tmp_path / "mm"
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
-    assert mm.find_micromamba(home, {"XRUNNER_MICROMAMBA": str(exe)}) == exe
-    with pytest.raises(mm.MicromambaMissing, match="XRUNNER_MICROMAMBA"):
-        mm.find_micromamba(home, {"XRUNNER_MICROMAMBA": str(tmp_path / "nope")})
+    assert mm.find_micromamba(home, {"XCRUNNER_MICROMAMBA": str(exe)}) == exe
+    with pytest.raises(mm.MicromambaMissing, match="XCRUNNER_MICROMAMBA"):
+        mm.find_micromamba(home, {"XCRUNNER_MICROMAMBA": str(tmp_path / "nope")})
 
 
 def test_find_uses_the_pinned_binary_or_explains(home, pinned_fake):
-    with pytest.raises(mm.MicromambaMissing, match="run: xrunner shim install conda"):
+    with pytest.raises(mm.MicromambaMissing, match="run: xcrunner shim install conda"):
         mm.find_micromamba(home, {})
     path = mm.install_micromamba(home, opener=pinned_fake[0])
     assert mm.find_micromamba(home, {}) == path

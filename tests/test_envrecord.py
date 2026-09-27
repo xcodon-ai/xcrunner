@@ -30,7 +30,7 @@ def img(home, tmp_path):
 
 @pytest.fixture
 def env_dir(tmp_path):
-    d = tmp_path / "proj" / ".xrunner-env"
+    d = tmp_path / "proj" / ".xcrunner-env"
     d.mkdir(parents=True)
     return d
 
@@ -84,8 +84,8 @@ def test_note_image_and_tag_move(home, img, env_dir, tmp_path):
     envrecord.note_image(env_dir, "rec:latest", img2, st, err=err)
     e = envrecord.load(env_dir)["images"]["rec:latest"]
     assert e["id"] == "sha256:" + img2.id and e["previous_ids"] == ["sha256:" + img.id]
-    assert err.getvalue() == (f"xrunner: rec:latest now points to {img2.id[:12]}; installs made on "
-                              f"{img.id[:12]} stay in .xrunner-env/{img.id}\n")
+    assert err.getvalue() == (f"xcrunner: rec:latest now points to {img2.id[:12]}; installs made on "
+                              f"{img.id[:12]} stay in .xcrunner-env/{img.id}\n")
 
 
 def test_image_entry_maps_commit_to_build(home, img):
@@ -143,7 +143,7 @@ def test_record_conda(env_dir, tmp_path):
         f"{proj / 'workspace' / 'conda_env'}\n{outside}\n")
     envrecord.record_conda(env_dir)
     assert envrecord.load(env_dir)["conda"] == {
-        "name:bwa_env": {"explicit": ".xrunner-env/conda/envs/bwa_env/conda-explicit.txt", "sha256": s1, "packages": 2},
+        "name:bwa_env": {"explicit": ".xcrunner-env/conda/envs/bwa_env/conda-explicit.txt", "sha256": s1, "packages": 2},
         "path:workspace/conda_env": {"explicit": "workspace/conda_env/conda-explicit.txt", "sha256": s2, "packages": 1},
     }
 
@@ -264,11 +264,11 @@ def test_record_all_switch_sets_last_used_from_new_first_used(home, env_dir, tmp
 def test_record_conda_resolves_symlinks_for_relative_keys(tmp_path):
     """Item 3: paths are resolved before relpath, so a symlinked project gives a clean key."""
     real_proj = tmp_path / "real" / "proj"
-    (real_proj / ".xrunner-env").mkdir(parents=True)
+    (real_proj / ".xcrunner-env").mkdir(parents=True)
     (real_proj / "ws" / "e1").mkdir(parents=True)
     link = tmp_path / "proj"
     link.symlink_to(real_proj)
-    env_dir = link / ".xrunner-env"
+    env_dir = link / ".xcrunner-env"
     s = explicit(real_proj / "ws" / "e1", ["https://c/a.conda#1"])
     home_conda = env_dir / "conda" / ".home" / ".conda"
     home_conda.mkdir(parents=True)
@@ -303,7 +303,7 @@ def test_update_keeps_unknown_top_level_keys(env_dir):
 
 
 def test_update_rejects_a_newer_version(env_dir):
-    """Item 5: update() refuses a stored version newer than what this xrunner writes."""
+    """Item 5: update() refuses a stored version newer than what this xcrunner writes."""
     (env_dir / "environment.json").write_text(
         json.dumps({"version": 2, "images": {}, "layers": {}, "conda": {}}))
     with pytest.raises(XcodonError, match="version 2"):
@@ -340,11 +340,11 @@ def test_image_entry_carries_platform_counts_and_a_packages_file(home, tmp_path,
     st = ImageStore(home, sources=[])
     envrecord.note_image(env_dir, "plat:1", image, st)
     raw = json.loads((env_dir / "environment.json").read_text())
-    assert raw["xrunner"] == __version__
+    assert raw["xcrunner"] == __version__
     e = raw["images"]["plat:1"]
     assert e["platform"] == "linux/amd64"
     assert e["package_counts"] == {"conda": 1, "pip": 2}
-    assert e["packages_file"] == f".xrunner-env/packages/{image.id}.json"
+    assert e["packages_file"] == f".xcrunner-env/packages/{image.id}.json"
     pf = env_dir.parent / e["packages_file"]
     body = json.loads(pf.read_text())
     inv = st.package_inventory(image)
@@ -483,4 +483,4 @@ def test_explicit_entry_hashes_the_bytes_it_read(env_dir):
     prefix = env_dir / "conda"
     s = explicit(prefix, ["https://c/a.conda#1", "https://c/b.conda#2"])
     e = envrecord._explicit_entry(prefix, env_dir.parent)
-    assert e == {"explicit": ".xrunner-env/conda/conda-explicit.txt", "sha256": s, "packages": 2}
+    assert e == {"explicit": ".xcrunner-env/conda/conda-explicit.txt", "sha256": s, "packages": 2}

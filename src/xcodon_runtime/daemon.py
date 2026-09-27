@@ -20,7 +20,7 @@ from xcodon_runtime.shim import resolve_real
 log = logging.getLogger(__name__)
 CHUNK = 1 << 20
 
-# Finding a real docker, skipping xrunner's own shims, lives in shim.py (shared
+# Finding a real docker, skipping xcrunner's own shims, lives in shim.py (shared
 # with the conda shim). Kept public here under its original name.
 resolve_docker = resolve_real
 

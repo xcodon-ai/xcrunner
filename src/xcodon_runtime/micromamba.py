@@ -1,4 +1,4 @@
-"""The pinned micromamba binary behind `xrunner conda`. See spec section 12.7.
+"""The pinned micromamba binary behind `xcrunner conda`. See spec section 12.7.
 
 The binary comes from conda-forge's own micromamba package, the channel the
 conda shim needs anyway. The archive and the extracted binary are both checked
@@ -25,7 +25,7 @@ MICROMAMBA_VERSION = "2.9.0"
 MICROMAMBA_URL = "https://conda.anaconda.org/conda-forge/linux-64/micromamba-2.9.0-0.tar.bz2"
 MICROMAMBA_ARCHIVE_SHA256 = "8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd"
 # SHA-256 of `bin/micromamba` exactly as stored in the archive. Conda installers
-# rewrite a placeholder prefix inside it (info/has_prefix); xrunner uses the
+# rewrite a placeholder prefix inside it (info/has_prefix); xcrunner uses the
 # file as extracted, which is safe because every call passes the root prefix
 # explicitly.
 MICROMAMBA_BINARY_SHA256 = "366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3"
@@ -34,7 +34,7 @@ MICROMAMBA_BINARY_SHA256 = "366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79
 MICROMAMBA_OSX_ARM64_URL = "https://conda.anaconda.org/conda-forge/osx-arm64/micromamba-2.9.0-0.tar.bz2"
 MICROMAMBA_OSX_ARM64_ARCHIVE_SHA256 = "500f5074feb8d02c4296ef9921c3650ed2874171805a9fbb8fbb53896433646b"
 MICROMAMBA_OSX_ARM64_BINARY_SHA256 = "ec2a072f028e1a7cf20f3e2e74d5a8127cf5a5f27636375b5359811565f4e5be"
-MICROMAMBA_ENV = "XRUNNER_MICROMAMBA"
+MICROMAMBA_ENV = "XCRUNNER_MICROMAMBA"
 _SUBDIRS = {("Linux", "x86_64"): "linux-64", ("Linux", "amd64"): "linux-64", ("Linux", "AMD64"): "linux-64",
             ("Darwin", "arm64"): "osx-arm64"}
 SUPPORTED_SUBDIRS = ("linux-64", "osx-arm64")
@@ -92,7 +92,7 @@ def _check_platform() -> None:
 
 
 def find_micromamba(home: RuntimeHome, environ: Mapping[str, str] | None = None) -> Path:
-    """The micromamba to run: $XRUNNER_MICROMAMBA, else the pinned binary under the home."""
+    """The micromamba to run: $XCRUNNER_MICROMAMBA, else the pinned binary under the home."""
     environ = os.environ if environ is None else environ
     override = environ.get(MICROMAMBA_ENV)
     if override:
@@ -103,7 +103,7 @@ def find_micromamba(home: RuntimeHome, environ: Mapping[str, str] | None = None)
     p = pinned_path(home)
     if p.is_file() and os.access(p, os.X_OK):
         return p
-    raise MicromambaMissing("micromamba is not installed; run: xrunner shim install conda")
+    raise MicromambaMissing("micromamba is not installed; run: xcrunner shim install conda")
 
 
 def install_micromamba(home: RuntimeHome, source: Path | None = None,

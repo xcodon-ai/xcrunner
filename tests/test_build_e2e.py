@@ -50,7 +50,7 @@ def test_agent_recipe_builds_and_runs_without_docker_commands(home, engine_name,
     monkeypatch.setenv("PATH", str(empty_path_dir))
     assert cli.main(["shim", "install", "--dir", str(shim_dir)]) == 0
 
-    # The shim comes first on PATH, so `docker` resolves to it. xrunner's own daemon
+    # The shim comes first on PATH, so `docker` resolves to it. xcrunner's own daemon
     # source skips shims when resolving the real docker for the Dockerfile's FROM image,
     # so it still finds /usr/bin/docker for that lookup.
     env = {**os.environ, "PATH": f"{shim_dir}:/usr/bin:/bin", "XCODON_RUNTIME_HOME": str(home.path),
@@ -73,7 +73,7 @@ def test_agent_recipe_builds_and_runs_without_docker_commands(home, engine_name,
     assert run_rc == 0, build_text + run_text.decode(errors="replace")[-2000:]
     assert run_text.strip(), "python printed no tabulate version:\n" + build_text
 
-    # The real docker daemon never received the tag: the whole build ran inside xrunner.
+    # The real docker daemon never received the tag: the whole build ran inside xcrunner.
     post = subprocess.run(["/usr/bin/docker", "image", "inspect", tag], capture_output=True)
     assert post.returncode != 0
 
@@ -83,7 +83,7 @@ def test_agent_recipe_builds_on_a_host_without_docker(home, engine_name, tmp_pat
 
     PATH is the shim directory only. /bin is a link to /usr/bin on some hosts,
     so adding /bin would expose the real docker. The shim starts with
-    ``#!/bin/sh`` and runs xrunner by its absolute path, so it needs no PATH.
+    ``#!/bin/sh`` and runs xcrunner by its absolute path, so it needs no PATH.
     """
     tag = "xcodon/e2e-nodocker-python-deps:latest"
     pre = subprocess.run(["/usr/bin/docker", "image", "inspect", tag], capture_output=True)

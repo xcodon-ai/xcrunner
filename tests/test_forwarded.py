@@ -44,7 +44,7 @@ def test_runs_the_linux_cli_in_the_working_folder(captured, tmp_path, monkeypatc
     assert call["cmd"] == [sys.executable, "-m", "xcodon_runtime.cli", "run", "--rm", "alpine", "echo", "--env"]
     assert call["cwd"] == str(tmp_path)
     assert call["env"]["XCODON_LOG"] == "debug" and call["env"]["A"] == "b=c"
-    assert call["env"][ENV_LAYER_DIR_ENV] == str(Path.home() / ".xrunner-vm" / "env-layers")
+    assert call["env"][ENV_LAYER_DIR_ENV] == str(Path.home() / ".xcrunner-vm" / "env-layers")
 
 
 def test_a_passed_layer_dir_wins(captured, tmp_path):
@@ -55,19 +55,19 @@ def test_a_passed_layer_dir_wins(captured, tmp_path):
 def test_a_version_mismatch_fails_before_running(captured, tmp_path):
     code, err = _main(["--expect-version", "0.0.1", "--cwd", str(tmp_path), "--", "ps"])
     assert code == forwarded.EXIT_ERROR == 125
-    assert f"the VM has xrunner {__version__} and the Mac has 0.0.1" in err
-    assert "xrunner machine start" in err and not captured
+    assert f"the VM has xcrunner {__version__} and the Mac has 0.0.1" in err
+    assert "xcrunner machine start" in err and not captured
 
 
 def test_a_folder_that_is_not_shared_fails(captured, tmp_path):
     code, err = _main(["--cwd", str(tmp_path / "missing"), "--", "ps"])
-    assert code == 125 and "is not a folder in the xrunner VM" in err and not captured
+    assert code == 125 and "is not a folder in the xcrunner VM" in err and not captured
 
 
 @pytest.mark.parametrize("argv", [["--cwd"], ["--env", "NOEQUALS", "--", "ps"], ["ps"], ["--bogus", "--", "ps"]])
 def test_bad_arguments_fail(captured, argv):
     code, err = _main(argv)
-    assert code == 125 and err.startswith("xrunner: ") and not captured
+    assert code == 125 and err.startswith("xcrunner: ") and not captured
 
 
 def test_exit_codes_and_signal_deaths_pass_through():

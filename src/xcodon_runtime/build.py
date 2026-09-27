@@ -1,4 +1,4 @@
-"""Run a Dockerfile subset in xrunner containers. See spec section 11.3."""
+"""Run a Dockerfile subset in xcrunner containers. See spec section 11.3."""
 
 from __future__ import annotations
 
@@ -258,8 +258,8 @@ class Builder:
                     while tokens and tokens[0].startswith("--"):
                         flag = tokens.pop(0)
                         if flag.startswith("--platform"):
-                            self.out(f" ---> {flag} is ignored by xrunner")
-                            log.warning("Dockerfile line %d: %s is ignored by xrunner", ins.line, flag)
+                            self.out(f" ---> {flag} is ignored by xcrunner")
+                            log.warning("Dockerfile line %d: %s is ignored by xcrunner", ins.line, flag)
                         else:
                             raise XcodonError(f"line {ins.line}: unsupported FROM flag {flag!r}")
                     if not tokens:
@@ -278,8 +278,8 @@ class Builder:
                     raise XcodonError(f"line {ins.line}: FROM must come before {ins.name}")
 
                 if ins.name in IGNORED:
-                    self.out(f" ---> {ins.name} is ignored by xrunner")
-                    log.warning("Dockerfile line %d: %s is ignored by xrunner", ins.line, ins.name)
+                    self.out(f" ---> {ins.name} is ignored by xcrunner")
+                    log.warning("Dockerfile line %d: %s is ignored by xcrunner", ins.line, ins.name)
                     continue
 
                 content_hash = ""
@@ -335,7 +335,7 @@ class Builder:
             # only FROM (plus ignored lines like EXPOSE), the "final image"
             # is that base image, and it must not be annotated with this
             # Dockerfile: a pulled image would wrongly gain one, and a no-op
-            # build over an earlier `xrunner build` image would overwrite
+            # build over an earlier `xcrunner build` image would overwrite
             # that image's own recorded Dockerfile.
             if image.id != base_image_id:
                 self.rt.images.annotate(image.id, dockerfile=dockerfile_text, base=base_image_id)
@@ -371,8 +371,8 @@ class Builder:
             if t.startswith("--from"):
                 raise XcodonError(f"line {ins.line}: multi-stage builds ({ins.name} --from) are not supported")
             if t.startswith("--chown") or t.startswith("--chmod"):
-                self.out(f" ---> {ins.name} {t} is ignored by xrunner")
-                log.warning("Dockerfile line %d: %s %s is ignored by xrunner", ins.line, ins.name, t)
+                self.out(f" ---> {ins.name} {t} is ignored by xcrunner")
+                log.warning("Dockerfile line %d: %s %s is ignored by xcrunner", ins.line, ins.name, t)
                 continue
             if t.startswith("--"):
                 raise XcodonError(f"line {ins.line}: unsupported {ins.name} flag {t!r}")

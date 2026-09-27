@@ -139,8 +139,8 @@ def test_returned_container_reloads_and_reports_status(home, busybox_image, engi
 
 
 def test_env_dir_from_environment_persists_installs(home, busybox_image, engine_name, tmp_path, monkeypatch):
-    env = tmp_path / "xrunner-env"
-    monkeypatch.setenv("XRUNNER_ENV_DIR", str(env))
+    env = tmp_path / "xcrunner-env"
+    monkeypatch.setenv("XCRUNNER_ENV_DIR", str(env))
     mgr = XcodonContainerManager(home.path, engine=engine_name)
 
     async def flow():
@@ -166,8 +166,8 @@ def test_env_dir_is_validated_at_construction(home, tmp_path, monkeypatch):
     assert mgr.env_dir == str(tmp_path / "envs" / "a")
     with pytest.raises(XcodonError, match="absolute"):
         XcodonContainerManager(home.path, env_dir="relative/env")
-    monkeypatch.setenv("XRUNNER_ENV_DIR", "also/relative")
-    with pytest.raises(XcodonError, match="XRUNNER_ENV_DIR"):
+    monkeypatch.setenv("XCRUNNER_ENV_DIR", "also/relative")
+    with pytest.raises(XcodonError, match="XCRUNNER_ENV_DIR"):
         XcodonContainerManager(home.path)
-    monkeypatch.setenv("XRUNNER_ENV_DIR", "")
+    monkeypatch.setenv("XCRUNNER_ENV_DIR", "")
     assert XcodonContainerManager(home.path).env_dir is None

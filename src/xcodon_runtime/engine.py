@@ -51,7 +51,7 @@ def container_lock(container: "Container"):
 
     An engine is given no runtime home, so the lock sits in the container
     dir that holds this container, which is ``<home>/containers`` or
-    ``$XRUNNER_CONTAINER_DIR``. Without this lock two concurrent starts both
+    ``$XCRUNNER_CONTAINER_DIR``. Without this lock two concurrent starts both
     see "not running" and each spawns a keeper; the first one is then leaked.
     """
     return container_lock_in(container.dir.parent, f"container-{container.id}")

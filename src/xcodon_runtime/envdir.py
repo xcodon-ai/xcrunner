@@ -30,14 +30,14 @@ ENV_HOLDER_NAME = "holder"
 WAIT_LOG_EVERY = 60  # seconds between two "waiting for env layer" warnings
 # Keeps env folder layers on another disk: the VM disk on macOS, or a node-local
 # disk on a cluster. The record and the conda root stay in the env folder.
-ENV_LAYER_DIR_ENV = "XRUNNER_ENV_LAYER_DIR"
+ENV_LAYER_DIR_ENV = "XCRUNNER_ENV_LAYER_DIR"
 ENV_LAYER_SOURCE_NAME = "source"
 
 
 def env_layer_root(env_dir: str | os.PathLike) -> Path:
     """The folder holding ``<image_id>/`` layers for ``env_dir``. See spec section 16.5.
 
-    That is ``env_dir`` itself unless ``XRUNNER_ENV_LAYER_DIR`` is set. Then it is
+    That is ``env_dir`` itself unless ``XCRUNNER_ENV_LAYER_DIR`` is set. Then it is
     ``<layer dir>/<key>``, where the key is the first 16 hex digits of the
     SHA-256 of the resolved env folder path.
     """
@@ -120,10 +120,10 @@ def acquire_env_lock(layer_dir: Path, holder: str) -> int:
                 if waited % WAIT_LOG_EVERY == 0:
                     other = _read_holder(layer_dir)
                     if other:
-                        log.warning("waiting for env layer %s: container %s holds it (xrunner stop %s frees it)",
+                        log.warning("waiting for env layer %s: container %s holds it (xcrunner stop %s frees it)",
                                     layer_dir, other, other)
                     else:
-                        log.warning("waiting for env layer %s: another container holds it (xrunner stop frees it)",
+                        log.warning("waiting for env layer %s: another container holds it (xcrunner stop frees it)",
                                     layer_dir)
                 time.sleep(1)
                 waited += 1

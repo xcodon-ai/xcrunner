@@ -32,20 +32,20 @@ TOOL = textwrap.dedent(
 )
 
 
-def test_cwltool_runs_a_tool_through_xrunner(home, busybox_image, engine_name, tmp_path):
+def test_cwltool_runs_a_tool_through_xcrunner(home, busybox_image, engine_name, tmp_path):
     (tmp_path / "echo.cwl").write_text(TOOL)
-    # Prefer the interpreter's own bin directory: shutil.which("xrunner") can resolve to an
+    # Prefer the interpreter's own bin directory: shutil.which("xcrunner") can resolve to an
     # unrelated program of the same name earlier on PATH (seen on a host that also has an
     # unrelated program installed system-wide). Only fall back to PATH search if
-    # this venv has no xrunner script of its own (e.g. running against a non-editable install
+    # this venv has no xcrunner script of its own (e.g. running against a non-editable install
     # laid out differently).
-    xrunner = os.path.join(os.path.dirname(sys.executable), "xrunner")
-    if not os.path.exists(xrunner):
-        xrunner = shutil.which("xrunner")
-    assert xrunner and os.path.exists(xrunner), "install the package so the xrunner script exists"
+    xcrunner = os.path.join(os.path.dirname(sys.executable), "xcrunner")
+    if not os.path.exists(xcrunner):
+        xcrunner = shutil.which("xcrunner")
+    assert xcrunner and os.path.exists(xcrunner), "install the package so the xcrunner script exists"
     env = {**os.environ, "XCODON_RUNTIME_HOME": str(home.path), "XCODON_ENGINE": engine_name}
     r = subprocess.run(
-        ["cwltool", "--user-space-docker-cmd", xrunner, "--outdir", str(tmp_path / "out"),
+        ["cwltool", "--user-space-docker-cmd", xcrunner, "--outdir", str(tmp_path / "out"),
          str(tmp_path / "echo.cwl"), "--message", "hello from cwl"],
         capture_output=True, text=True, env=env, timeout=600,
     )

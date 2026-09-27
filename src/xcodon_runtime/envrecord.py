@@ -116,7 +116,7 @@ def update(env_dir: Path, fn: Callable[[dict], None]) -> Path:
     """Load, mutate and atomically rewrite the record, under the env dir's lock.
 
     Unknown top-level keys in the stored file survive the round trip. A
-    stored version newer than what this xrunner writes is refused outright,
+    stored version newer than what this xcrunner writes is refused outright,
     rather than silently downgraded.
     """
     env_dir = Path(env_dir)
@@ -126,13 +126,13 @@ def update(env_dir: Path, fn: Callable[[dict], None]) -> Path:
         version = doc.get("version")
         if isinstance(version, int) and version > VERSION:
             raise XcodonError(f"environment record {path} has version {version}; "
-                               f"this xrunner writes version {VERSION}")
+                               f"this xcrunner writes version {VERSION}")
         for key in ("images", "layers", "conda"):
             if not isinstance(doc.get(key), dict):
                 doc[key] = {}
         fn(doc)
         doc["version"] = VERSION
-        doc["xrunner"] = __version__
+        doc["xcrunner"] = __version__
         _atomic_write(path, (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode(), ".environment-")
     return path
 
@@ -245,7 +245,7 @@ def note_image(env_dir: Path, ref: str, image, store, err: TextIO | None = None)
             if cur["id"] not in prev:
                 prev.append(cur["id"])
             old_hex = cur["id"].split(":", 1)[-1]
-            print(f"xrunner: {ref} now points to {image.id[:12]}; installs made on {old_hex[:12]} "
+            print(f"xcrunner: {ref} now points to {image.id[:12]}; installs made on {old_hex[:12]} "
                   f"stay in {env_dir.name}/{old_hex}", file=err or sys.stderr)
             new["previous_ids"] = prev
             new["first_used"] = now

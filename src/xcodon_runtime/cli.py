@@ -22,7 +22,7 @@ from xcodon_runtime.keeper import KEEPER_LOG
 from xcodon_runtime.reference import parse_platform
 from xcodon_runtime.shim import DOCKER_MARKER as SHIM_MARKER
 
-log = logging.getLogger("xrunner")
+log = logging.getLogger("xcrunner")
 
 EXIT_RUNTIME_ERROR = 125
 
@@ -122,7 +122,7 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
         flag, has_eq, inline = tok.partition("=")
         table = RUN_FLAGS if flag in RUN_FLAGS else IGNORED_FLAGS if flag in IGNORED_FLAGS else None
         if table is None:
-            raise UsageError(f"unknown option {flag}; xrunner supports a docker subset (see xrunner run --help)")
+            raise UsageError(f"unknown option {flag}; xcrunner supports a docker subset (see xcrunner run --help)")
         takes_value = table[flag]
         value = None
         if takes_value:
@@ -165,10 +165,10 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
                 raise UsageError("--env-dir needs a directory, not an empty value")
             opts.env_dir = os.path.abspath(os.path.expanduser(value))
         # -i / --interactive: stdin always passes through
-    raise UsageError("no image given: usage: xrunner run [OPTIONS] IMAGE [COMMAND...]")
+    raise UsageError("no image given: usage: xcrunner run [OPTIONS] IMAGE [COMMAND...]")
 
 
-RUN_USAGE = ("xrunner {cmd} [--mount=... | -v HOST:CONTAINER[:ro]] [-w DIR] [-e K=V] [--entrypoint E] "
+RUN_USAGE = ("xcrunner {cmd} [--mount=... | -v HOST:CONTAINER[:ro]] [-w DIR] [-e K=V] [--entrypoint E] "
              "[-u USER] [--name N] [--rm] [-i] [--cidfile F] [--pull missing|always|never] [--env-dir DIR] IMAGE [COMMAND...]")
 
 _GLOBAL_OPTIONS_WITH_VALUE = {"--engine", "--home"}
@@ -181,7 +181,7 @@ def _split_argv(argv: list[str]) -> tuple[list[str], list[str] | None]:
     `docker` is transparent: `docker run`/`docker create` split the same way, one token
     later. Any other verb after `docker` is left whole (`(argv, None)`) for `main` to
     carve up itself, since a docker verb's own flags (`docker image inspect --format ...`)
-    must not be mistaken for xrunner's global options either.
+    must not be mistaken for xcrunner's global options either.
     """
     i = 0
     while i < len(argv):
@@ -208,7 +208,7 @@ def _split_at_docker(head: list[str]) -> tuple[list[str], list[str]] | None:
     """Where in `head` (already split by `_split_argv`) the `docker` verb sits, skipping
     global options the same way `_split_argv` does. None when `head` is not a docker
     invocation at all. Used by `main` to carve the docker verb's own argv (build flags,
-    image inspect flags, ...) away from xrunner's own argparse parser."""
+    image inspect flags, ...) away from xcrunner's own argparse parser."""
     i = 0
     while i < len(head):
         tok = head[i]
@@ -224,12 +224,12 @@ def _split_at_docker(head: list[str]) -> tuple[list[str], list[str]] | None:
     return None
 
 
-# SHIM_NAME is the file `xrunner shim install` writes: a `docker` that forwards to
-# `xrunner docker`, so tools that shell out to a real docker binary (build, image
+# SHIM_NAME is the file `xcrunner shim install` writes: a `docker` that forwards to
+# `xcrunner docker`, so tools that shell out to a real docker binary (build, image
 # inspect, ...) work on a host that has no docker at all.
 SHIM_NAME = "docker"
 
-# Maps a docker verb to the xrunner verb (as argv) that implements it.
+# Maps a docker verb to the xcrunner verb (as argv) that implements it.
 DOCKER_VERBS = {
     "build": ["build"], "pull": ["pull"], "images": ["images"], "rmi": ["rmi"], "tag": ["tag"],
     "run": ["run"], "create": ["create"], "start": ["start"], "exec": ["exec"], "stop": ["stop"],
@@ -238,7 +238,7 @@ DOCKER_VERBS = {
 }
 # `docker image <verb>` has its own, smaller, vocabulary.
 DOCKER_IMAGE_VERBS = {"inspect": ["inspect"], "ls": ["images"], "list": ["images"], "rm": ["rmi"], "remove": ["rmi"]}
-# `docker ... inspect --type ...` disambiguates container vs image; xrunner's inspect is
+# `docker ... inspect --type ...` disambiguates container vs image; xcrunner's inspect is
 # always an image, so that flag (and its `=value` form) is dropped. `--format`/`-f` is
 # NOT dropped here: cmd_inspect understands the exact `{{.Id}}` format itself (see below).
 _INSPECT_DROP = {"--type"}
@@ -246,21 +246,21 @@ _INSPECT_DROP = {"--type"}
 
 def translate_docker_argv(argv: list[str]) -> list[str]:
     """Map a docker CLI invocation's argv (verb + its own args, no leading `docker`) to
-    xrunner's. Raises UsageError for a verb xrunner does not offer."""
+    xcrunner's. Raises UsageError for a verb xcrunner does not offer."""
     if not argv:
         raise UsageError("docker: a verb is required (build, image inspect, run, ...)")
     verb, rest = argv[0], list(argv[1:])
     if verb == "image":
         if not rest or rest[0] not in DOCKER_IMAGE_VERBS:
             sub_verb = rest[0] if rest else ""
-            raise UsageError(f"docker image {sub_verb}: not supported by xrunner")
+            raise UsageError(f"docker image {sub_verb}: not supported by xcrunner")
         head = DOCKER_IMAGE_VERBS[rest[0]]
         rest = rest[1:]
         verb = "inspect" if head == ["inspect"] else head[0]
     elif verb in DOCKER_VERBS:
         head = DOCKER_VERBS[verb]
     else:
-        raise UsageError(f"docker {verb}: not supported by xrunner")
+        raise UsageError(f"docker {verb}: not supported by xcrunner")
     if verb == "inspect":
         cleaned = []
         skip = False
@@ -515,7 +515,7 @@ def _env_folder(args) -> Path:
         return Path(args.env_dir).expanduser().resolve()
     found = find_env_folder(Path.cwd(), os.environ)
     if found is None:
-        raise UsageError("no env folder found here; pass --env-dir DIR or set XRUNNER_ENV_DIR")
+        raise UsageError("no env folder found here; pass --env-dir DIR or set XCRUNNER_ENV_DIR")
     return found
 
 
@@ -566,7 +566,7 @@ def cmd_shim(rt: Runtime, args) -> int:
     target_dir = Path(args.dir or os.path.dirname(sys.executable)).expanduser().resolve()
     if args.kind == "docker":
         if args.micromamba:
-            raise UsageError("--micromamba only applies to `xrunner shim install conda`")
+            raise UsageError("--micromamba only applies to `xcrunner shim install conda`")
         check_install(target_dir, [SHIM_NAME], args.force)
         written = [write_shim(target_dir, SHIM_NAME, SHIM_MARKER, "docker")]
     else:
@@ -583,7 +583,7 @@ def cmd_shim(rt: Runtime, args) -> int:
 
 
 def cmd_sandbox(rt: Runtime, args) -> int:
-    """Print shell `export` lines that make this project an xrunner sandbox (spec 14)."""
+    """Print shell `export` lines that make this project an xcrunner sandbox (spec 14)."""
     from xcodon_runtime.sandbox import activate
 
     if not os.path.isabs(args.env_dir):
@@ -598,8 +598,8 @@ def cmd_sandbox(rt: Runtime, args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="xrunner", description="Rootless container runtime for Docker images.")
-    p.add_argument("--version", action="version", version=f"xc-xrunner {__version__}")
+    p = argparse.ArgumentParser(prog="xcrunner", description="Rootless container runtime for Docker images.")
+    p.add_argument("--version", action="version", version=f"xcrunner {__version__}")
     p.add_argument("-v", "--verbose", action="count", default=0, help="-v for info, -vv for debug")
     p.add_argument("--engine", choices=("ns", "proot"), help="force an engine (default: probe the host)")
     p.add_argument("--home", help="runtime home (default: $XCODON_RUNTIME_HOME or ~/.xcodon/runtime)")
@@ -668,7 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--build-arg", action="append")
     s.add_argument("--no-cache", action="store_true")
     s.add_argument("-q", "--quiet", action="store_true")
-    # Flags docker build accepts that xrunner ignores. Booleans take no value; --rm/
+    # Flags docker build accepts that xcrunner ignores. Booleans take no value; --rm/
     # --force-rm/--pull must NOT be nargs="?", or `build --rm CTX` would swallow CTX
     # as --rm's own optional argument instead of leaving it for the context positional.
     s.add_argument("--rm", action="store_true", help=argparse.SUPPRESS)
@@ -709,13 +709,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("docker", help="accept docker verbs (build, image inspect, run, ...)", add_help=False)
     s.set_defaults(func=cmd_docker, rest=[])
 
-    s = sub.add_parser("conda", help="conda's command line over a pinned micromamba (see `xrunner conda --help`)",
+    s = sub.add_parser("conda", help="conda's command line over a pinned micromamba (see `xcrunner conda --help`)",
                        add_help=False)
     s.set_defaults(func=cmd_conda, rest=[])
 
     s = sub.add_parser("env", help="the project's environment record (images and package lists)")
     esub = s.add_subparsers(dest="env_cmd", required=True)
-    i = esub.add_parser("record", help="rebuild .xrunner-env/environment.json from what is on disk")
+    i = esub.add_parser("record", help="rebuild .xcrunner-env/environment.json from what is on disk")
     i.add_argument("--env-dir")
     i.set_defaults(func=cmd_env, json=False)
     i = esub.add_parser("show", help="print the environment record")
@@ -723,17 +723,17 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--json", action="store_true")
     i.set_defaults(func=cmd_env)
 
-    s = sub.add_parser("sandbox", help="route a project's docker and conda calls through xrunner")
+    s = sub.add_parser("sandbox", help="route a project's docker and conda calls through xcrunner")
     sbsub = s.add_subparsers(dest="sandbox_cmd", required=True)
     i = sbsub.add_parser("activate", help="write the project's shims and print the export lines to apply")
-    i.add_argument("env_dir", help="the project's env folder, an absolute path (usually <project>/.xrunner-env)")
+    i.add_argument("env_dir", help="the project's env folder, an absolute path (usually <project>/.xcrunner-env)")
     i.set_defaults(func=cmd_sandbox)
 
-    s = sub.add_parser("shim", help="install docker or conda commands that forward to xrunner")
+    s = sub.add_parser("shim", help="install docker or conda commands that forward to xcrunner")
     ssub = s.add_subparsers(dest="shim_cmd", required=True)
     i = ssub.add_parser("install", help="write docker (default) or conda/mamba/micromamba scripts")
     i.add_argument("kind", nargs="?", choices=("docker", "conda"), default="docker")
-    i.add_argument("--dir", help="where to write them (default: beside the xrunner executable)")
+    i.add_argument("--dir", help="where to write them (default: beside the xcrunner executable)")
     i.add_argument("--force", action="store_true", help="install even if a real one is already on PATH")
     i.add_argument("--micromamba", help="conda only: copy this micromamba binary instead of downloading the pinned one")
     i.set_defaults(func=cmd_shim)
@@ -747,16 +747,16 @@ def _configure_logging(verbosity: int) -> None:
         level = logging.DEBUG
     elif verbosity == 1 or env_level == "info":
         level = logging.INFO
-    logging.basicConfig(level=level, format="xrunner: %(levelname)s %(name)s: %(message)s", stream=sys.stderr,
+    logging.basicConfig(level=level, format="xcrunner: %(levelname)s %(name)s: %(message)s", stream=sys.stderr,
                         force=True)
 
 
 def main(argv: list[str] | None = None, _runtime: Runtime | None = None) -> int:
     """`_runtime` lets `cmd_docker` re-enter `main` with the same Runtime (and so the
-    same --engine/--home) after translating a docker invocation to an xrunner one.
+    same --engine/--home) after translating a docker invocation to an xcrunner one.
 
     On macOS, the outer call goes to `macvm.mac_main`, which runs a few commands on
-    the Mac and forwards the rest to the xrunner VM (spec section 16)."""
+    the Mac and forwards the rest to the xcrunner VM (spec section 16)."""
     if _runtime is None and sys.platform == "darwin":
         from xcodon_runtime.macvm import mac_main
 
@@ -787,13 +787,13 @@ def _main_local(argv: list[str] | None = None, _runtime: Runtime | None = None) 
     if _runtime is None:
         # Only the outer call configures logging: the re-entrant call from cmd_docker
         # parses a translated argv with no `-v`/`-vv` of its own, and would otherwise
-        # silently reset verbosity back to the default on every `xrunner docker ...`.
+        # silently reset verbosity back to the default on every `xcrunner docker ...`.
         _configure_logging(args.verbose)
     try:
         rt = _runtime if _runtime is not None else Runtime(args.home, engine=args.engine)
         return args.func(rt, args)
     except XcodonError as e:
-        print(f"xrunner: {e}", file=sys.stderr)
+        print(f"xcrunner: {e}", file=sys.stderr)
         return EXIT_RUNTIME_ERROR
     except KeyboardInterrupt:
         return 130
