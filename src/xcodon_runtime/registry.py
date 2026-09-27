@@ -54,8 +54,7 @@ class FetchedImage:
     repo_digests: list[str] = field(default_factory=list)
 
 
-def select_platform(manifests: list[dict], platform: Platform) -> str:
-    """Pick the manifest digest for ``platform`` from an index. Raises PullError if none."""
+def _match_platform(manifests: list[dict], platform: Platform) -> str | None:
     for m in manifests:
         p = m.get("platform") or {}
         if p.get("os") != platform.os or p.get("architecture") != platform.architecture:
@@ -63,6 +62,21 @@ def select_platform(manifests: list[dict], platform: Platform) -> str:
         if platform.variant and p.get("variant") not in (None, platform.variant):
             continue
         return m["digest"]
+    return None
+
+
+def select_platform(manifests: list[dict], platform: Platform, fallbacks: tuple[Platform, ...] = ()) -> str:
+    """Pick the manifest digest for ``platform`` from an index, else for the first
+    of ``fallbacks`` the index has (platforms the host runs through emulation).
+    Raises PullError if none."""
+    digest = _match_platform(manifests, platform)
+    if digest is not None:
+        return digest
+    for fallback in fallbacks:
+        digest = _match_platform(manifests, fallback)
+        if digest is not None:
+            log.warning("no %s image; using %s, which runs through x86_64 emulation", platform, fallback)
+            return digest
     available = ", ".join(
         f"{(m.get('platform') or {}).get('os')}/{(m.get('platform') or {}).get('architecture')}" for m in manifests
     )
@@ -183,10 +197,10 @@ class RegistryClient:
     def _manifest(self, ref: Reference, manifest_ref: str) -> dict:
         return self._manifest_and_digest(ref, manifest_ref)[0]
 
-    def fetch(self, ref: Reference, platform: Platform) -> FetchedImage:
+    def fetch(self, ref: Reference, platform: Platform, fallbacks: tuple[Platform, ...] = ()) -> FetchedImage:
         manifest, top_digest = self._manifest_and_digest(ref, ref.manifest_ref)
         if manifest.get("mediaType") in INDEX_TYPES or "manifests" in manifest:
-            digest = select_platform(manifest["manifests"], platform)
+            digest = select_platform(manifest["manifests"], platform, fallbacks)
             manifest = self._manifest(ref, digest)
         if "config" not in manifest or "layers" not in manifest:
             raise PullError(f"{ref.name}: unsupported manifest type {manifest.get('mediaType')!r} (schema v1 is not supported)")

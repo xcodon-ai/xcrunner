@@ -18,7 +18,7 @@ from xcodon_runtime.flatten import build_rootfs
 from xcodon_runtime.home import RuntimeHome
 from xcodon_runtime.layerdiff import hash_layer_dir, link_tree
 from xcodon_runtime.pkgscan import Pkg, pkg_from_json, pkg_to_json, scan_tree
-from xcodon_runtime.reference import Platform, host_platform, parse_reference
+from xcodon_runtime.reference import Platform, emulated_platforms, host_can_run, host_platform, parse_reference
 from xcodon_runtime.registry import FetchedImage, RegistryClient
 from xcodon_runtime.tarlayer import extract_layer, open_layer_stream
 
@@ -65,6 +65,20 @@ class Image:
     @property
     def short_id(self) -> str:
         return self.id[:12]
+
+
+def _check_runnable(config: dict, name: str) -> None:
+    """Refuse an image this host cannot run, instead of failing later with "exec format error"."""
+    arch = config.get("architecture")
+    if not isinstance(arch, str) or not arch:
+        return
+    os_name = config.get("os") if isinstance(config.get("os"), str) else "linux"
+    image_platform = Platform(os_name, arch)
+    if host_can_run(image_platform):
+        return
+    host = host_platform()
+    emulation = " and has no x86_64 emulation registered" if arch == "amd64" and host.architecture == "arm64" else ""
+    raise PullError(f"image {name} is {image_platform} only; this host runs {host}{emulation}")
 
 
 class ImageStore:
@@ -117,8 +131,17 @@ class ImageStore:
     # -- pull --------------------------------------------------------------------
 
     def pull(self, ref: str, platform: Platform | None = None) -> Image:
+        """Fetch ``ref`` for ``platform``, by default the host's own.
+
+        With no ``platform`` given, an index without the host's platform falls
+        back to one the host emulates, and an image whose architecture the host
+        cannot run is refused before import (spec 16.7). An explicit platform
+        skips both.
+        """
         reference = parse_reference(ref)
+        explicit = platform is not None
         platform = platform or host_platform()
+        fallbacks = () if explicit else emulated_platforms()
         lock_name = "pull-" + hashlib.sha256(reference.name.encode()).hexdigest()[:16]
         # ``store`` shared is held for the whole pull, fetch included, so a
         # concurrent prune (which takes it exclusive) cannot delete a blob
@@ -130,12 +153,17 @@ class ImageStore:
                     if not source.available() or not source.has_image(reference):
                         continue
                 try:
-                    fetched = source.fetch(reference, platform)
+                    if isinstance(source, RegistryClient):
+                        fetched = source.fetch(reference, platform, fallbacks=fallbacks)
+                    else:
+                        fetched = source.fetch(reference, platform)
                     break
                 except PullError as e:
                     errors.append(f"{source.name}: {e}")
             else:
                 raise PullError(f"could not fetch {reference.name}: " + ("; ".join(errors) or "no source available"))
+            if not explicit:
+                _check_runnable(fetched.config, reference.name)
             return self.import_fetched(fetched, reference.name)
 
     def import_fetched(self, fetched: FetchedImage, ref_name: str) -> Image:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform as _platform
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from xcodon_runtime.errors import InvalidReference
 
@@ -101,6 +102,43 @@ _MACHINE_TO_ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "ar
 def host_platform() -> Platform:
     machine = _platform.machine()
     return Platform("linux", _MACHINE_TO_ARCH.get(machine, machine))
+
+
+# binfmt_misc handlers that run x86_64 programs on an ARM host: Rosetta (Lima on
+# macOS) and qemu-user. See spec section 16.7.
+BINFMT_DIR = Path("/proc/sys/fs/binfmt_misc")
+AMD64_HANDLERS = ("rosetta", "qemu-x86_64")
+
+
+def _handler_usable(path: Path) -> bool:
+    """True for an enabled handler with the F flag, which keeps working inside
+    mount namespaces after pivot_root, where the interpreter path is gone."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return False
+    if not lines or lines[0].strip() != "enabled":
+        return False
+    for line in lines:
+        if line.startswith("flags:"):
+            return "F" in line.partition(":")[2]
+    return False
+
+
+def emulated_platforms(binfmt_dir: Path | None = None) -> tuple[Platform, ...]:
+    """Platforms this host runs through emulation: linux/amd64 on an ARM host with a usable handler."""
+    d = BINFMT_DIR if binfmt_dir is None else binfmt_dir
+    if host_platform().architecture == "arm64" and any(_handler_usable(d / n) for n in AMD64_HANDLERS):
+        return (Platform("linux", "amd64"),)
+    return ()
+
+
+def host_can_run(platform: Platform, binfmt_dir: Path | None = None) -> bool:
+    if platform.os != "linux":
+        return False
+    if platform.architecture == host_platform().architecture:
+        return True
+    return any(p.architecture == platform.architecture for p in emulated_platforms(binfmt_dir))
 
 
 def parse_platform(text: str) -> Platform:
