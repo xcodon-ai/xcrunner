@@ -223,6 +223,13 @@ inside one Lima VM. Install Lima first:
 `scripts/mac_smoke.sh` runs the end-to-end checks on a Mac and writes a report to
 `~/xcrunner-mac-smoke.txt`.
 
+GitHub's macOS runners cannot start VMs, so CI's `lima-linux` job runs the same
+script on Linux against a real Lima QEMU VM. The test-only setting
+`XCRUNNER_MACHINE_LINUX_TEST=1` makes a Linux host act like the Mac side. That VM is
+x86_64 without Rosetta, and it shares only the home folder and
+`XCRUNNER_MACHINE_MOUNTS`, so Apple's VM framework and Rosetta are still tested only
+on a Mac.
+
 ## Environment variables
 
 | Variable | Meaning |

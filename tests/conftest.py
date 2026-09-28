@@ -43,6 +43,7 @@ def home(tmp_path: Path, monkeypatch) -> RuntimeHome:
     monkeypatch.setenv("XCODON_RUNTIME_HOME", str(root))
     monkeypatch.delenv("XCRUNNER_CONTAINER_DIR", raising=False)
     monkeypatch.delenv("XCRUNNER_ENV_LAYER_DIR", raising=False)
+    monkeypatch.delenv("XCRUNNER_MACHINE_LINUX_TEST", raising=False)
     return RuntimeHome(root)
 
 

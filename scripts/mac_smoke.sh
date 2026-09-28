@@ -2,6 +2,8 @@
 # Real checks of xcrunner on an Apple silicon Mac with macOS 26+ and Lima 2 (spec 16.10).
 # Run it from a shell where `xcrunner` is on PATH. It writes a report to
 # ~/xcrunner-mac-smoke.txt (or $XCRUNNER_SMOKE_REPORT) and prints PASS/FAIL per step.
+# CI also runs it on Linux with XCRUNNER_MACHINE_LINUX_TEST=1, against a real Lima
+# QEMU VM, because GitHub's macOS runners cannot start VMs.
 set -u
 REPORT="${XCRUNNER_SMOKE_REPORT:-$HOME/xcrunner-mac-smoke.txt}"
 # Under the home folder, which the VM shares at the same path.
@@ -35,6 +37,12 @@ bind_mount() {
 cwltool_run() {
   local cwltool
   cwltool="$(command -v cwltool || true)"
+  if [ "${XCRUNNER_MACHINE_LINUX_TEST:-}" = 1 ]; then
+    # A Linux host shares only the home folder with the VM, so keep cwltool's
+    # temp files there. On a Mac they stay in /var/folders, which is shared.
+    mkdir -p "$WORK/tmp"
+    export TMPDIR="$WORK/tmp"
+  fi
   if [ -z "$cwltool" ]; then
     python3 -m venv "$WORK/cwl-venv" && "$WORK/cwl-venv/bin/pip" install -q cwltool || return 1
     cwltool="$WORK/cwl-venv/bin/cwltool"
@@ -59,7 +67,7 @@ CWL
 
 x86_image() {
   local image=quay.io/biocontainers/bwa:0.7.19--h577a1d6_1
-  xcrunner pull "$image" && xcrunner inspect "$image" | grep -q '"architecture": "amd64"' &&
+  xcrunner pull "$image" && xcrunner inspect "$image" | grep -qi '"architecture": "amd64"' &&
     { xcrunner run --rm "$image" bwa 2>&1 || true; } | grep -q 'Program: bwa'
 }
 
@@ -71,7 +79,10 @@ env_folder() {
 }
 
 conda_install() {
-  (cd "$WORK" && xcrunner conda create -p ./condaenv -y zlib && test -e ./condaenv/lib/libz.dylib &&
+  # Downloads the pinned micromamba; --force because a runner may have a real conda on PATH.
+  xcrunner shim install conda --dir "$WORK/shims" --force || return 1
+  (cd "$WORK" && xcrunner conda create -p ./condaenv -y zlib &&
+    { test -e ./condaenv/lib/libz.dylib || test -e ./condaenv/lib/libz.so; } &&
     xcrunner conda run -p ./condaenv true)
 }
 
@@ -94,7 +105,7 @@ kill_stops_container() {
 
 {
   echo "date: $(date)"
-  sw_vers
+  sw_vers 2>/dev/null || uname -a
   uname -m
   limactl --version
   xcrunner --version
@@ -105,7 +116,7 @@ step "1 machine start, status and info" machine_start
 step "2 hello from alpine" hello
 step "3 bind mount from the home folder" bind_mount
 step "4 cwltool run through xcrunner" cwltool_run
-step "5 x86_64-only bwa image through Rosetta" x86_image
+step "5 x86_64-only bwa image (through Rosetta on a Mac)" x86_image
 step "6 env folder keeps a pip install" env_folder
 step "7 conda shim installs a macOS package" conda_install
 step "8 killing xcrunner run stops the container" kill_stops_container

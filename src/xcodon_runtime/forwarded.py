@@ -2,16 +2,20 @@
 
 The Mac runs, over SSH::
 
-    python -m xcodon_runtime.forwarded --expect-version V --cwd CWD [--env NAME=VALUE ...] -- ARGV...
+    python -m xcodon_runtime.forwarded --expect-version V --cwd CWD --token T [--env NAME=VALUE ...] -- ARGV...
 
 This changes to CWD, applies the settings, and runs the Linux CLI on ARGV as a
-child. It exits with the child's exit code. When the SSH session ends because
-the Mac side was killed, this process gets a new parent; it then stops the child.
+child. It exits with the child's exit code. While it runs, ``~/.xcrunner-vm/run/T.pid``
+holds its pid, so the Mac side can signal it over a second SSH call when the Mac
+side is interrupted. Lima's SSH config shares one connection across calls, so a
+closed session does not end this process on its own. When this process does get
+a new parent, because its own SSH connection ended, it stops the child too.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -26,21 +30,26 @@ KILL_AFTER_SECONDS = 5.0
 _FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
+def run_dir() -> Path:
+    return Path.home() / ".xcrunner-vm" / "run"
+
+
 def default_layer_dir() -> Path:
     """Env folder layers on the VM disk: a shared Mac folder cannot hold an overlay upper layer."""
     return Path.home() / ".xcrunner-vm" / "env-layers"
 
 
-def _parse(argv: list[str]) -> tuple[str | None, str | None, dict[str, str], list[str]]:
+def _parse(argv: list[str]) -> tuple[str | None, str | None, str | None, dict[str, str], list[str]]:
     expect: str | None = None
     cwd: str | None = None
+    token: str | None = None
     env: dict[str, str] = {}
     i = 0
     while i < len(argv):
         tok = argv[i]
         if tok == "--":
-            return expect, cwd, env, argv[i + 1:]
-        if tok not in ("--expect-version", "--cwd", "--env"):
+            return expect, cwd, token, env, argv[i + 1:]
+        if tok not in ("--expect-version", "--cwd", "--token", "--env"):
             raise ValueError(f"forwarded: unknown option {tok!r}")
         if i + 1 >= len(argv):
             raise ValueError(f"forwarded: {tok} needs a value")
@@ -49,6 +58,10 @@ def _parse(argv: list[str]) -> tuple[str | None, str | None, dict[str, str], lis
             expect = value
         elif tok == "--cwd":
             cwd = value
+        elif tok == "--token":
+            if not re.fullmatch(r"[0-9a-f]{8,64}", value):
+                raise ValueError(f"forwarded: --token must be hex digits, got {value!r}")
+            token = value
         else:
             name, sep, val = value.partition("=")
             if not sep or not name:
@@ -59,10 +72,16 @@ def _parse(argv: list[str]) -> tuple[str | None, str | None, dict[str, str], lis
 
 
 def _run(cmd: list[str], env: dict[str, str], poll: float = POLL_SECONDS,
-         kill_after: float = KILL_AFTER_SECONDS) -> int:
+         kill_after: float = KILL_AFTER_SECONDS, pid_file: Path | None = None) -> int:
     """Run ``cmd`` and return its exit code, 128+N for a death by signal N."""
     parent = os.getppid()
     child = subprocess.Popen(cmd, env=env)
+    if pid_file is not None:
+        try:
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            pid_file.write_text(f"{os.getpid()}\n")
+        except OSError:
+            pid_file = None  # the Mac side's interrupt then falls back to closing SSH
 
     def forward(signum, _frame) -> None:
         try:
@@ -94,13 +113,15 @@ def _run(cmd: list[str], env: dict[str, str], poll: float = POLL_SECONDS,
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+        if pid_file is not None:
+            pid_file.unlink(missing_ok=True)
     return 128 - code if code < 0 else code
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     try:
-        expect, cwd, passed, rest = _parse(list(argv))
+        expect, cwd, token, passed, rest = _parse(list(argv))
     except ValueError as e:
         print(f"xcrunner: {e}", file=sys.stderr)
         return EXIT_ERROR
@@ -117,8 +138,11 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_ERROR
     env = dict(os.environ)
     env.update(passed)
+    # Inside the VM the CLI must run locally, never forward again.
+    env.pop("XCRUNNER_MACHINE_LINUX_TEST", None)
     env.setdefault(ENV_LAYER_DIR_ENV, str(default_layer_dir()))
-    return _run([sys.executable, "-m", "xcodon_runtime.cli", *rest], env)
+    pid_file = run_dir() / f"{token}.pid" if token else None
+    return _run([sys.executable, "-m", "xcodon_runtime.cli", *rest], env, pid_file=pid_file)
 
 
 if __name__ == "__main__":

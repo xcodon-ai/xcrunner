@@ -64,7 +64,8 @@ def test_a_folder_that_is_not_shared_fails(captured, tmp_path):
     assert code == 125 and "is not a folder in the xcrunner VM" in err and not captured
 
 
-@pytest.mark.parametrize("argv", [["--cwd"], ["--env", "NOEQUALS", "--", "ps"], ["ps"], ["--bogus", "--", "ps"]])
+@pytest.mark.parametrize("argv", [["--cwd"], ["--env", "NOEQUALS", "--", "ps"], ["ps"], ["--bogus", "--", "ps"],
+                                  ["--token", "../../etc", "--", "ps"], ["--token", "XYZ12345", "--", "ps"]])
 def test_bad_arguments_fail(captured, argv):
     code, err = _main(argv)
     assert code == 125 and err.startswith("xcrunner: ") and not captured
@@ -102,3 +103,18 @@ def test_the_command_stops_when_the_mac_side_goes_away(tmp_path):
     while not marker.exists() and time.time() < deadline:
         time.sleep(0.1)
     assert marker.read_text() == "term"
+
+
+def test_the_pid_file_exists_only_while_the_command_runs(tmp_path):
+    pid_file = tmp_path / "run" / "abcdef0123456789.pid"
+    probe = f"import pathlib, sys; sys.exit(0 if pathlib.Path({str(pid_file)!r}).read_text().strip() else 9)"
+    assert forwarded._run([sys.executable, "-c", probe], dict(os.environ), pid_file=pid_file) == 0
+    assert not pid_file.exists()
+
+
+def test_the_token_names_the_pid_file_under_the_vm_home(captured, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seen = {}
+    monkeypatch.setattr(forwarded, "_run", lambda cmd, env, pid_file=None, **kw: seen.update(pid=pid_file) or 0)
+    forwarded.main(["--cwd", str(tmp_path), "--token", "abcdef0123456789", "--", "ps"])
+    assert seen["pid"] == tmp_path / ".xcrunner-vm" / "run" / "abcdef0123456789.pid"

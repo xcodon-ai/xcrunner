@@ -14,11 +14,13 @@ import json
 import os
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TextIO
@@ -33,6 +35,9 @@ DEFAULT_NAME = "xcrunner"
 # Relative to the VM user's home, where SSH starts a remote command.
 VM_VENV = ".xcrunner-vm/venv"
 VM_PYTHON = f"{VM_VENV}/bin/python"
+VM_RUN_DIR = ".xcrunner-vm/run"  # forwarded.py's pid files, one per command
+# After an interrupt, how long the VM side gets to stop its command before SSH is ended.
+STOP_GRACE_SECONDS = 20.0
 INSTALL_RECORD = "xcrunner-installed.json"
 MAC_TEMP_FOLDERS = ("/private/var/folders", "/private/tmp")
 LOCAL_COMMANDS = frozenset({"conda", "shim", "sandbox"})
@@ -41,12 +46,25 @@ LOCAL_COMMANDS = frozenset({"conda", "shim", "sandbox"})
 PASSED_SETTINGS = ("XCRUNNER_ENV_DIR", "XCRUNNER_ENV_LAYER_DIR", "XCODON_ENGINE", "XCODON_LOG",
                    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 LIMA_MISSING = "xcrunner on macOS needs Lima 2.0 or newer: brew install lima"
+# Testing only: drive a real Lima QEMU VM from a Linux host, because GitHub's macOS
+# runners cannot start VMs. The VM is x86_64 without Rosetta, and only the home
+# folder and XCRUNNER_MACHINE_MOUNTS are shared.
+LINUX_TEST_ENV = "XCRUNNER_MACHINE_LINUX_TEST"
 SSH_FAILED = 255
 _TAIL_LINES = 30
 
 
 def is_macos() -> bool:
     return sys.platform == "darwin"
+
+
+def linux_test_mode(environ: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if environ is None else environ
+    return sys.platform.startswith("linux") and env.get(LINUX_TEST_ENV) == "1"
+
+
+def uses_machine() -> bool:
+    return is_macos() or linux_test_mode()
 
 
 def _tail(text: str, lines: int = _TAIL_LINES) -> str:
@@ -128,37 +146,37 @@ def _under(path: str, folder: str) -> bool:
     return folder == "/" or path == folder or path.startswith(folder + "/")
 
 
-def shared_folders(settings: MachineSettings, home: Path) -> list[str]:
+def shared_folders(settings: MachineSettings, home: Path, linux_test: bool = False) -> list[str]:
     """The writable folders the VM shares from the Mac, at the same paths."""
-    return [str(home), *MAC_TEMP_FOLDERS, *settings.mounts]
+    return [str(home), *(() if linux_test else MAC_TEMP_FOLDERS), *settings.mounts]
 
 
-def lima_yaml(settings: MachineSettings, home: Path, checkout: str | None) -> str:
-    """The Lima config for the xcrunner VM (spec 16.3)."""
+def lima_yaml(settings: MachineSettings, home: Path, checkout: str | None, linux_test: bool = False) -> str:
+    """The Lima config for the xcrunner VM (spec 16.3). ``linux_test``: a QEMU VM on a Linux host."""
     q = json.dumps
     lines = [
         "# Written by xcrunner (spec 16.3). Changing it needs `xcrunner machine rm` and a new start.",
         f"minimumLimaVersion: {q('.'.join(str(x) for x in MIN_LIMA))}",
         f"base: {q('template:ubuntu-24.04')}",
-        'vmType: "vz"',
-        'arch: "aarch64"',
+        *(['vmType: "qemu"'] if linux_test else ['vmType: "vz"', 'arch: "aarch64"']),
         f"cpus: {settings.cpus}",
         f"memory: {q(settings.memory)}",
         f"disk: {q(settings.disk)}",
-        'mountType: "virtiofs"',
+        f"mountType: {q('9p' if linux_test else 'virtiofs')}",
         "mounts:",
     ]
-    shared = shared_folders(settings, home)
+    shared = shared_folders(settings, home, linux_test)
     for folder in shared:
         lines += [f"- location: {q(folder)}", f"  mountPoint: {q(folder)}", "  writable: true"]
     if checkout is not None and not any(_under(checkout, f) for f in shared):
         lines += [f"- location: {q(checkout)}", f"  mountPoint: {q(checkout)}", "  writable: false"]
+        if linux_test:
+            # Lima caches read-only 9p mounts hard ("fscache"), so the VM would keep
+            # running old code after edits to an editable checkout.
+            lines += ["  9p:", '    cache: "mmap"']
+    if not linux_test:
+        lines += ["vmOpts:", "  vz:", "    rosetta:", "      enabled: true", "      binfmt: true"]
     lines += [
-        "vmOpts:",
-        "  vz:",
-        "    rosetta:",
-        "      enabled: true",
-        "      binfmt: true",
         "containerd:",
         "  system: false",
         "  user: false",
@@ -202,15 +220,22 @@ class Machine:
     runtime_home: Path
     lima_ver: str = ""
     environ: Mapping[str, str] = field(default_factory=dict)
+    linux_test: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str]) -> "Machine":
         from xcodon_runtime.home import RuntimeHome
 
-        check_host()
+        linux_test = linux_test_mode(environ)
+        if not linux_test:
+            check_host()
         limactl = find_limactl()
         version = lima_version(limactl)
-        return cls(MachineSettings.from_env(environ), limactl, Path.home(), RuntimeHome().path, version, environ)
+        return cls(MachineSettings.from_env(environ), limactl, Path.home(), RuntimeHome().path, version, environ,
+                   linux_test)
+
+    def shared(self) -> list[str]:
+        return shared_folders(self.settings, self.home, self.linux_test)
 
     @property
     def name(self) -> str:
@@ -272,7 +297,7 @@ class Machine:
 
     def create(self) -> None:
         path = self.state_dir / "lima.yaml"
-        path.write_text(lima_yaml(self.settings, self.home, install_source()))
+        path.write_text(lima_yaml(self.settings, self.home, install_source(), self.linux_test))
         self._lima(["create", "--tty=false", f"--name={self.name}", str(path)], "create")
 
     def start(self) -> None:
@@ -280,7 +305,9 @@ class Machine:
 
     def ssh_argv(self, remote: str, tty: bool = False) -> list[str]:
         return ["ssh", "-F", str(self.dir() / "ssh.config"),
-                "-o", "ControlMaster=auto", "-o", f"ControlPath={self.state_dir / 'ssh-%C'}",
+                # In Lima's short instance folder: a socket path must stay under about
+                # 104 bytes, which a long runtime home plus ssh's %C would exceed.
+                "-o", "ControlMaster=auto", "-o", f"ControlPath={self.dir() / 'xcrunner-ssh.sock'}",
                 "-o", "ControlPersist=10m", "-tt" if tty else "-T", f"lima-{self.name}", "--", remote]
 
     # install ---------------------------------------------------------------------
@@ -345,7 +372,7 @@ class Machine:
             "memory": info.get("memory") if info else None,
             "disk": info.get("disk") if info else None,
             "dir": str(self.dir(info)) if info else None,
-            "shared_folders": shared_folders(self.settings, self.home),
+            "shared_folders": self.shared(),
             "settings": {"cpus": self.settings.cpus, "memory": self.settings.memory,
                          "disk": self.settings.disk, "mounts": list(self.settings.mounts)},
             "lima": self.lima_ver,
@@ -361,7 +388,7 @@ MACHINE_USAGE = "usage: xcrunner machine {start|stop|status|shell|rm [-f]}\n"
 
 def machine_main(argv: Sequence[str], environ: Mapping[str, str], out: TextIO, err: TextIO,
                  stdin: TextIO | None = None) -> int:
-    if not is_macos():
+    if not uses_machine():
         raise XcodonError("machine commands are for macOS")
     argv = list(argv)
     if not argv or argv[0] in ("-h", "--help"):
@@ -423,6 +450,8 @@ def split_globals(argv: Sequence[str]) -> tuple[list[str], str | None, list[str]
 
 def mac_path(path: str) -> str:
     """Inside the VM, /tmp is the VM's own folder; the Mac's /tmp is shared as /private/tmp."""
+    if linux_test_mode():
+        return path  # a Linux host's /tmp is its own folder, and it is not shared
     if path == "/tmp" or path.startswith("/tmp/"):
         return "/private" + path
     return path
@@ -584,7 +613,7 @@ def wants_tty(argv: Sequence[str]) -> bool:
 
 def _check_cwd(m: Machine, cwd: str) -> None:
     checkout = install_source()
-    folders = shared_folders(m.settings, m.home) + ([checkout] if checkout else [])
+    folders = m.shared() + ([checkout] if checkout else [])
     if not any(_under(cwd, f) for f in folders):
         raise XcodonError(f"{cwd} is not shared with the xcrunner VM; it shares {', '.join(folders)}. "
                           "Add folders with XCRUNNER_MACHINE_MOUNTS, then run `xcrunner machine rm` and "
@@ -597,15 +626,38 @@ def run_forwarded(m: Machine, argv: Sequence[str], environ: Mapping[str, str], e
     cwd = mac_path(os.getcwd())
     _check_cwd(m, cwd)
     m.ensure_ready(err)
-    words = [VM_PYTHON, "-m", "xcodon_runtime.forwarded", "--expect-version", __version__, "--cwd", cwd]
+    token = secrets.token_hex(8)
+    words = [VM_PYTHON, "-m", "xcodon_runtime.forwarded", "--expect-version", __version__, "--cwd", cwd,
+             "--token", token]
     for k, v in forward_env(environ).items():
         words += ["--env", f"{k}={v}"]
     words += ["--", *prepare_argv(argv, environ)]
     tty = wants_tty(argv) and sys.stdin.isatty()
     proc = subprocess.Popen(m.ssh_argv(shlex.join(words), tty), stdout=subprocess.PIPE if capture else None)
+    state: dict = {}
 
-    def stop(_signum, _frame) -> None:
-        proc.terminate()
+    def stop(signum, _frame) -> None:
+        """Signal the command in the VM, as a direct call on Linux would get the signal.
+
+        Lima's shared SSH connection does not end the remote command when this
+        side's SSH client goes, so a second SSH call signals it through its pid
+        file. SSH itself is ended after a grace period, or on a second signal.
+        """
+        if "signal" in state:
+            proc.terminate()
+            return
+        state["signal"] = signum
+        kill = shlex.join(["sh", "-c", f'kill -{int(signum)} "$(cat {VM_RUN_DIR}/{token}.pid)" 2>/dev/null || true'])
+        try:
+            subprocess.Popen(m.ssh_argv(kill), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError:
+            proc.terminate()
+            return
+        timer = threading.Timer(STOP_GRACE_SECONDS, proc.terminate)
+        timer.daemon = True
+        timer.start()
+        state["timer"] = timer
 
     previous = {}
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -618,9 +670,13 @@ def run_forwarded(m: Machine, argv: Sequence[str], environ: Mapping[str, str], e
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-    if proc.returncode == SSH_FAILED:
-        raise XcodonError("cannot reach the xcrunner VM; run `xcrunner machine status`")
+        if "timer" in state:
+            state["timer"].cancel()
     code = proc.returncode
+    if "signal" in state and (code == SSH_FAILED or code < 0):
+        return 128 + int(state["signal"]), output or b""  # ended by our own interrupt, not a lost VM
+    if code == SSH_FAILED:
+        raise XcodonError("cannot reach the xcrunner VM; run `xcrunner machine status`")
     return (128 - code if code < 0 else code), output or b""
 
 

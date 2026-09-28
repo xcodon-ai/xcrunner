@@ -31,3 +31,53 @@ jobs:
       - run: python -c "import xcodon_runtime.cli, xcodon_runtime.macvm, xcodon_runtime.forwarded"
       - run: xcrunner --version
       - run: pytest -q -rs tests/test_macvm.py tests/test_macvm_forward.py tests/test_forwarded.py tests/test_micromamba_platforms.py
+  # The Mac side against a real Lima VM. GitHub's macOS runners cannot start VMs,
+  # so this boots a Lima QEMU VM on Linux with XCRUNNER_MACHINE_LINUX_TEST=1 and
+  # runs the smoke script. It covers VM creation, installing xcrunner in the VM,
+  # forwarding, shared folders and cwltool; not Apple's VM framework or Rosetta.
+  lima-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      LIMA_VERSION: "2.2.0"
+      XCRUNNER_MACHINE_LINUX_TEST: "1"
+      XCRUNNER_MACHINE_CPUS: "2"
+      XCRUNNER_MACHINE_MEMORY: "4GiB"
+      XCRUNNER_MACHINE_DISK: "30GiB"
+      XCRUNNER_SMOKE_REPORT: ${{ github.workspace }}/smoke-report.txt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install QEMU and enable KVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ovmf qemu-system-x86 qemu-utils
+          sudo modprobe kvm
+          sudo chown "$USER" /dev/kvm
+      - name: Install Lima
+        run: |
+          base="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}"
+          curl -fsSLO "$base/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
+          curl -fsSLO "$base/SHA256SUMS"
+          grep " lima-${LIMA_VERSION}-Linux-x86_64.tar.gz\$" SHA256SUMS | sha256sum -c -
+          sudo tar -C /usr/local -xzf "lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
+          limactl --version
+      - name: Cache Lima's image downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/lima
+          key: lima-${{ env.LIMA_VERSION }}-ubuntu-24.04
+      - run: pip install -e ".[dev,zstd]"
+      - name: Smoke test against the Lima VM
+        run: bash scripts/mac_smoke.sh
+      - name: Lima logs on failure
+        if: failure()
+        run: |
+          for f in ~/.lima/xcrunner/*.log; do echo "== $f"; tail -n 50 "$f"; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lima-smoke-report
+          path: smoke-report.txt

@@ -757,7 +757,7 @@ def main(argv: list[str] | None = None, _runtime: Runtime | None = None) -> int:
 
     On macOS, the outer call goes to `macvm.mac_main`, which runs a few commands on
     the Mac and forwards the rest to the xcrunner VM (spec section 16)."""
-    if _runtime is None and sys.platform == "darwin":
+    if _runtime is None and (sys.platform == "darwin" or os.environ.get("XCRUNNER_MACHINE_LINUX_TEST") == "1"):
         from xcodon_runtime.macvm import mac_main
 
         return mac_main(list(sys.argv[1:] if argv is None else argv), _main_local)

@@ -152,6 +152,7 @@ def test_a_forwarded_run_streams_output_and_exit_code(mac, busybox_image, engine
     (call,) = [a for a in log(mac["state"], "ssh") if "xcodon_runtime.forwarded" in a[-1]]
     assert call[:2] == ["-F", str(mac["lima_home"] / "xcrunner" / "ssh.config")]
     assert "-T" in call and "lima-xcrunner" in call
+    assert f"ControlPath={mac['lima_home'] / 'xcrunner' / 'xcrunner-ssh.sock'}" in call
     assert f"--expect-version {__version__}" in call[-1] and f"--cwd {mac['mac_home']}" in call[-1]
 
 
@@ -187,30 +188,60 @@ def test_ssh_failure_is_reported(mac, monkeypatch):
     assert code == 125 and "cannot reach the xcrunner VM" in err
 
 
-def test_sigterm_on_the_mac_ends_ssh(mac, monkeypatch):
+def test_an_interrupt_signals_the_command_in_the_vm(mac, monkeypatch):
     m = macvm.Machine.from_env(dict(os.environ))
     m.ensure_ready(io.StringIO())
     monkeypatch.setattr(m, "ensure_ready", lambda err: {})
-    terminated = []
+    started = []
 
     class FakeProc:
-        returncode = 143
+        returncode = 255  # what ssh reports when it is ended
 
-        def __init__(self, argv, stdout=None):
-            pass
+        def __init__(self, argv, **kw):
+            started.append(argv)
 
         def communicate(self):
             signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
             return None, None
 
         def terminate(self):
-            terminated.append(True)
+            started.append("terminated")
 
     monkeypatch.setattr(macvm.subprocess, "Popen", FakeProc)
     before = signal.getsignal(signal.SIGTERM)
-    code, _ = macvm.run_forwarded(m, ["ps"], dict(os.environ), io.StringIO())
-    assert terminated == [True] and code == 143
+    code, _ = macvm.run_forwarded(m, ["run", "--rm", "img", "sleep", "300"], dict(os.environ), io.StringIO())
+    assert code == 128 + signal.SIGTERM, "an interrupt we sent is not a lost VM"
+    main_call, kill_call = started[0], started[1]
+    token = main_call[-1].split("--token ", 1)[1].split()[0]
+    assert kill_call[-1].startswith("sh -c ") and f"kill -{int(signal.SIGTERM)}" in kill_call[-1]
+    assert f".xcrunner-vm/run/{token}.pid" in kill_call[-1]
+    assert "terminated" not in started, "ssh is not cut off before the VM side had its grace period"
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_a_second_interrupt_ends_ssh_at_once(mac, monkeypatch):
+    m = macvm.Machine.from_env(dict(os.environ))
+    monkeypatch.setattr(m, "ensure_ready", lambda err: {})
+    events = []
+
+    class FakeProc:
+        returncode = 255
+
+        def __init__(self, argv, **kw):
+            events.append("started")
+
+        def communicate(self):
+            handler = signal.getsignal(signal.SIGINT)
+            handler(signal.SIGINT, None)
+            handler(signal.SIGINT, None)
+            return None, None
+
+        def terminate(self):
+            events.append("terminated")
+
+    monkeypatch.setattr(macvm.subprocess, "Popen", FakeProc)
+    code, _ = macvm.run_forwarded(m, ["ps"], dict(os.environ), io.StringIO())
+    assert code == 128 + signal.SIGINT and events.count("terminated") == 1
 
 
 def test_subprocess_is_the_real_one_after_the_fake():
