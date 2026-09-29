@@ -1,9 +1,10 @@
 # xcrunner
 
 A rootless container runtime for Docker images. It runs the images that
-coala and coala-runtime use on hosts without Docker and without root.
+coala and coala-runtime use on hosts without Docker and without root. It needs
+Python 3.10 or newer; CI tests 3.10, 3.12 and 3.14.
 
-Two engines, chosen automatically:
+On Linux, xcrunner picks one of two engines by itself:
 
 - **ns**: kernel user namespaces plus overlayfs, no helper binary. Native
   speed. Needs a Linux kernel 5.11 or newer with unprivileged user namespaces
@@ -11,14 +12,22 @@ Two engines, chosen automatically:
 - **proot**: a vendored static PRoot runs the container under ptrace. Works
   on any Linux, slower, and creation copies the image rootfs.
 
+On an Apple silicon Mac, xcrunner runs the Linux xcrunner inside a Lima VM; see
+[macOS](#macos).
+
 ## Install
 
-    pip install xcrunner                # or: uv pip install xcrunner
-    xcrunner info                            # shows the engine and probe results
+    pip install xcrunner     # or: uv pip install xcrunner
+    xcrunner info            # shows the engine and probe results
 
-Optional: `pip install 'xcrunner[zstd]'` for zstd-compressed layers.
-On aarch64 hosts without user namespaces, provide a PRoot binary with
-`XCODON_PROOT=/path/to/proot`. The command is `xcrunner`. The package on PyPI is `xcrunner`, and the Python module is `xcodon_runtime`.
+- The command and the PyPI package are both `xcrunner`. The Python module is
+  `xcodon_runtime`.
+- `pip install 'xcrunner[zstd]'` adds support for zstd-compressed layers.
+- The bundled PRoot is for x86_64. On an aarch64 host without user namespaces,
+  point `XCODON_PROOT` at a PRoot binary.
+- xcrunner was published as `xc-xrunner` up to 0.1.2. Uninstall that package
+  first: `pip uninstall xc-xrunner`.
+
 ## Use
 
     xcrunner pull python:3.12-slim
@@ -38,8 +47,10 @@ On aarch64 hosts without user namespaces, provide a PRoot binary with
 
 `--env-dir` keeps the container's writable layer in a host folder, keyed by
 image id, so tools installed in one container are there for the next one.
-Delete `<env-dir>/<image-id>` to reset. coala-runtime uses this through the
-`XCRUNNER_ENV_DIR` variable.
+Delete `<env-dir>/<image-id>` to reset. With `XCRUNNER_ENV_LAYER_DIR` set, the
+layer lives in that folder instead; see [Clusters with shared
+storage](#clusters-with-shared-storage). coala-runtime uses env folders through
+the `XCRUNNER_ENV_DIR` variable.
 
 Two global flags come before the subcommand: `--engine ns|proot` forces an
 engine, and `--home DIR` picks the state directory for this one command.
@@ -50,6 +61,12 @@ image id at import. When the daemon's tag later points at another image
 (for example after a `docker build` there), the next `run`, `create`, or
 `build` that uses the tag imports it again. `--pull never` and image ids
 skip this check.
+
+An image the host cannot run fails at pull time with a clear message, instead
+of failing later with "exec format error". On an ARM host with a Rosetta or
+`qemu-x86_64` binfmt handler registered, an image that has no ARM build falls
+back to its x86_64 build, and xcrunner prints one warning line.
+`xcrunner pull --platform` skips both.
 
 ## Build and commit
 
@@ -138,8 +155,12 @@ Offline, pass `--micromamba PATH` to use a binary you already have.
 `mamba` and `micromamba` shims into the project's `.xcrunner-env/bin` and prints
 the two `export` lines (PATH first, then `XCRUNNER_ENV_DIR`) that send a shell's
 docker and conda calls to xcrunner. The Python API is
-`xcodon_runtime.sandbox.activate(env_dir)`. opencodon calls it by itself when
-its container engine is `xcrunner`, so `--container-engine xcrunner` is enough.
+`xcodon_runtime.sandbox.activate(env_dir)`.
+
+opencodon calls it by itself when its container engine is `xcrunner`, so
+`--container-engine xcrunner` is enough. When the engine is `docker` and no
+Docker daemon answers, opencodon switches that session to xcrunner by itself.
+Its `container_engine_fallback` setting turns that off.
 
 ## Environment record
 
@@ -235,6 +256,7 @@ on a Mac.
 | Variable | Meaning |
 |---|---|
 | `XCODON_RUNTIME_HOME` | State directory. Default `~/.xcodon/runtime`. |
+| `XCRUNNER_ENV_DIR` | The project's env folder, used by the conda shim, coala-runtime and the sandbox shims. |
 | `XCRUNNER_CONTAINER_DIR` | Container folders. Default `<home>/containers`. |
 | `XCRUNNER_ENV_LAYER_DIR` | Env folder layers on another disk. Default: in the env folder. On a cluster, a node-local disk gives each node its own layers. |
 | `XCRUNNER_MACHINE_NAME` | macOS: the Lima VM's name. Default `xcrunner`. |
@@ -243,7 +265,9 @@ on a Mac.
 | `XCODON_ENGINE` | `ns` or `proot`. Skips probing. |
 | `XCODON_PROOT` | Path to a PRoot binary. |
 | `XCODON_PROOT_ARGS` | Extra PRoot flags, for example `-k 5.15.0`. |
+| `XCRUNNER_MICROMAMBA` | A micromamba binary for the conda shim, instead of the pinned download. |
 | `XCODON_LOG` | `info` or `debug`. |
+| `XCRUNNER_MACHINE_LINUX_TEST` | Testing only: `1` makes a Linux host act as the Mac side, against a Lima QEMU VM. |
 
 ## Limits
 
@@ -258,23 +282,24 @@ on a Mac.
 
 ## coala
 
-In coala, add one branch to `configure_container_runner`:
+coala runs CWL tools on xcrunner with `container_runner='xcrunner'`. It runs the
+`xcrunner` command beside the running Python, or else the one on PATH, as
+cwltool's `--user-space-docker-cmd`. cwltool then calls `xcrunner inspect`,
+`xcrunner pull` and `xcrunner run` with docker-style flags.
 
-```python
-    if container_runner == "xcrunner":
-        runtime_context.user_space_docker_cmd = shutil.which("xcrunner") or "xcrunner"
-```
+Any other cwltool setup works the same way:
 
-cwltool then calls `xcrunner inspect`, `xcrunner pull`, and `xcrunner run` with
-docker-style flags.
+    cwltool --user-space-docker-cmd "$(command -v xcrunner)" tool.cwl job.yml
 
 ## coala-runtime
 
-xcodon-runtime ships `xcodon_runtime.coala_adapter.XcodonContainerManager`,
-which implements coala-runtime's `ContainerManager` interface. In
-coala-runtime, add `XCRUNNER = "xcrunner"` to `ContainerEngine`, return the
-adapter from `make_container_manager` for that value, and try it in
-autodetection after Docker and Podman and before Apptainer.
+coala-runtime runs its containers on xcrunner with
+`COALA_CONTAINER_ENGINE=xcrunner`. With the variable unset, it picks xcrunner
+when neither Docker nor Podman is usable. `pip install 'coala-runtime[xcrunner]'`
+installs xcrunner with it, from the first coala-runtime release after 0.1.0; 0.1.0
+itself cannot run xcrunner. The adapter is
+`xcodon_runtime.coala_adapter.XcodonContainerManager`, which implements
+coala-runtime's `ContainerManager` interface.
 
 ## Development
 
@@ -283,3 +308,17 @@ autodetection after Docker and Podman and before Apptainer.
     python scripts/fetch_proot.py          # only if _bin/ is missing
     pytest -q                              # unit + ns + proot on a capable host
     XCODON_TEST_NETWORK=1 pytest -m network
+
+Tests that need user namespaces, PRoot, a Docker daemon or cwltool skip
+themselves when the host lacks them. Network tests run only with
+`XCODON_TEST_NETWORK=1`.
+
+`scripts/mac_smoke.sh` is the end-to-end check. On a Mac it runs against the real
+VM. On a Linux host with KVM, QEMU and Lima 2, it runs against a Lima QEMU VM, as
+CI's `lima-linux` job does:
+
+    XCRUNNER_MACHINE_LINUX_TEST=1 bash scripts/mac_smoke.sh
+
+It writes its report to `~/xcrunner-mac-smoke.txt`. Use a separate
+`XCRUNNER_MACHINE_NAME`, and `xcrunner machine rm -f` afterwards, to keep the test VM
+apart from any other.
