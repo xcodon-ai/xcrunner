@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 
 import pytest
 
@@ -16,7 +17,7 @@ def manager(home, busybox_image, engine_name):
 def test_matches_coala_runtime_interface():
     for method in ("ensure_image", "create_container", "start_container", "exec_command",
                    "get_logs", "remove_container", "cleanup_all"):
-        assert asyncio.iscoroutinefunction(getattr(XcodonContainerManager, method))
+        assert inspect.iscoroutinefunction(getattr(XcodonContainerManager, method))
     assert XcodonContainerManager.system_site_packages_writable is True
 
 
