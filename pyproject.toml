@@ -9,10 +9,12 @@ description = "Rootless container runtime for Docker images, built for coala"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-dependencies = []
+# zstd layers: Python 3.14+ reads them with the stdlib (compression.zstd).
+dependencies = ['zstandard>=0.21; python_version < "3.14"']
 
 [project.optional-dependencies]
-zstd = ["zstandard>=0.21"]
+# Kept so `pip install 'xcrunner[zstd]'` still works; zstd support is now built in.
+zstd = []
 dev = ["pytest>=8", "ruff>=0.4", "pyyaml>=6"]
 
 [project.scripts]

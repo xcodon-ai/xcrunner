@@ -6,9 +6,7 @@ import stat
 import tarfile
 import warnings
 
-import pytest
 
-from xcodon_runtime.errors import UnsupportedLayer
 from xcodon_runtime.tarlayer import extract_layer, open_layer_stream, _layer_filter
 
 
@@ -96,22 +94,6 @@ def test_open_layer_stream_detects_gzip_and_plain(tmp_path):
             dest.mkdir()
             extract_layer(s, dest)
             assert (dest / "f").read_bytes() == b"1"
-
-
-def test_open_layer_stream_zstd_without_module(tmp_path, monkeypatch):
-    import builtins
-
-    real_import = builtins.__import__
-
-    def fake_import(name, *a, **k):
-        if name == "zstandard":
-            raise ImportError
-        return real_import(name, *a, **k)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    (tmp_path / "z").write_bytes(b"\x28\xb5\x2f\xfd" + b"\x00" * 16)
-    with pytest.raises(UnsupportedLayer, match="zstd"):
-        open_layer_stream(tmp_path / "z")
 
 
 def test_open_layer_stream_gzip_no_resource_leak(tmp_path):

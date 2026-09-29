@@ -22,7 +22,9 @@ On an Apple silicon Mac, xcrunner runs the Linux xcrunner inside a Lima VM; see
 
 - The command and the PyPI package are both `xcrunner`. The Python module is
   `xcodon_runtime`.
-- `pip install 'xcrunner[zstd]'` adds support for zstd-compressed layers.
+- zstd-compressed layers work out of the box. Python 3.14 and newer read them with
+  the standard library; older versions install the `zstandard` package as a
+  dependency. The old `[zstd]` extra still installs, and adds nothing.
 - The bundled PRoot is for x86_64. On an aarch64 host without user namespaces,
   point `XCODON_PROOT` at a PRoot binary.
 - xcrunner was published as `xc-xrunner` up to 0.1.2. Uninstall that package
@@ -304,7 +306,7 @@ coala-runtime's `ContainerManager` interface.
 ## Development
 
     uv venv .venv && . .venv/bin/activate
-    uv pip install -e ".[dev,zstd]"
+    uv pip install -e ".[dev]"
     python scripts/fetch_proot.py          # only if _bin/ is missing
     pytest -q                              # unit + ns + proot on a capable host
     XCODON_TEST_NETWORK=1 pytest -m network

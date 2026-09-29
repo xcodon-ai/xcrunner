@@ -29,16 +29,33 @@ def open_layer_stream(path: Path) -> BinaryIO:
     if head.startswith(GZIP_MAGIC):
         return gzip.open(path, "rb")  # type: ignore[return-value]
     if head.startswith(ZSTD_MAGIC):
-        try:
-            import zstandard
-        except ImportError:
-            raise UnsupportedLayer(
-                f"{path.name} is zstd-compressed; install the extra: pip install 'xcrunner[zstd]'"
-            ) from None
-        return zstandard.ZstdDecompressor().stream_reader(  # type: ignore[return-value]
-            open(path, "rb")
-        )
+        return _open_zstd(path)
     return open(path, "rb")
+
+
+def _open_zstd(path: Path) -> BinaryIO:
+    """A zstd layer: Python 3.14+ reads it with the stdlib; older Pythons use zstandard.
+
+    zstandard is a dependency on Python before 3.14, so a normal install always
+    has one of the two. A 3.14+ Python built without zstd support falls back to
+    zstandard too, when it is installed.
+    """
+    try:
+        from compression import zstd as stdlib_zstd
+    except ImportError:
+        stdlib_zstd = None
+    if stdlib_zstd is not None:
+        return stdlib_zstd.open(path, "rb")  # type: ignore[return-value]
+    try:
+        import zstandard
+    except ImportError:
+        raise UnsupportedLayer(
+            f"{path.name} is zstd-compressed, and this Python has neither compression.zstd "
+            "(Python 3.14 and newer) nor the zstandard package: pip install zstandard"
+        ) from None
+    return zstandard.ZstdDecompressor().stream_reader(  # type: ignore[return-value]
+        open(path, "rb")
+    )
 
 
 def _hardlink_escapes(linkname: str, dest: str) -> bool:
