@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: sudo apt-get update && sudo apt-get install -y busybox-static
-      - run: pip install -e ".[dev,zstd]"
+      - run: pip install -e ".[dev,udocker]"
       - run: ruff check src tests
       - run: xcrunner info
       # cwltool is not installed in this job, so the cwltool-marked tests skip by design.

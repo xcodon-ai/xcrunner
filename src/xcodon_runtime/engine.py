@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from xcodon_runtime.containers import Container
 
 log = logging.getLogger(__name__)
-ENGINE_NAMES = ("ns", "proot")
+ENGINE_NAMES = ("ns", "proot", "udocker")
 # What select_engine reports when neither engine can run on this host.
 NO_ENGINE = "none"
 
@@ -82,10 +82,15 @@ def select_engine(home: RuntimeHome, override: str | None = None) -> EngineChoic
                    f"overlayfs cannot use, such as NFS; set {CONTAINER_DIR_ENV} to a local disk)")
     ptrace = probes.get(PTRACE_PROBE, {"ok": True, "error": ""})
     if not ptrace["ok"]:
-        both = (f"no engine can run on this host. The ns engine needs unprivileged user namespaces: "
-                f"{_problems(probes, failed)}. The proot engine needs ptrace: "
-                f"{_problems(probes, [PTRACE_PROBE])}. Ask the admins to allow unprivileged user "
-                "namespaces, or run xcrunner outside the sandbox or container this shell is in")
+        blocked = (f"the ns engine needs unprivileged user namespaces: {_problems(probes, failed)}. "
+                   f"The proot engine needs ptrace: {_problems(probes, [PTRACE_PROBE])}")
+        from xcodon_runtime.engine_udocker import INSTALL_HINT, find_udocker
+
+        if find_udocker() is not None:
+            log.info("ns and proot are blocked; using udocker (%s)", blocked)
+            return EngineChoice("udocker", probes, f"udocker's Fakechroot mode, because {blocked}")
+        both = (f"no engine can run on this host: {blocked}. The udocker engine needs neither: "
+                f"{INSTALL_HINT}. Or ask the admins to allow unprivileged user namespaces")
         log.info("%s", both)  # create() raises it; logging it as a warning would print it twice
         return EngineChoice(NO_ENGINE, probes, both)
     log.info("ns engine unavailable (%s); using proot", reason)
@@ -112,4 +117,8 @@ def get_engine(name: str) -> Engine:
         from xcodon_runtime.engine_proot import ProotEngine
 
         return ProotEngine()
+    if name == "udocker":
+        from xcodon_runtime.engine_udocker import UdockerEngine
+
+        return UdockerEngine()
     raise EngineUnavailable(f"unknown engine {name!r}")

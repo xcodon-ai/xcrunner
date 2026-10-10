@@ -63,16 +63,18 @@ def test_ns_failing_with_ptrace_working_still_picks_proot(home, monkeypatch):
     assert eng.select_engine(home).name == "proot"
 
 
-def test_no_engine_when_both_are_blocked(home, monkeypatch):
+def test_no_engine_when_both_are_blocked(home, monkeypatch, tmp_path):
     monkeypatch.delenv("XCODON_ENGINE", raising=False)
+    monkeypatch.setenv("XCRUNNER_UDOCKER", str(tmp_path / "no-udocker"))  # a host without udocker
     monkeypatch.setattr(eng, "run_probes", lambda *a: _probes(False, False, "ptrace: seccomp filter"))
     choice = eng.select_engine(home)
     assert choice.name == eng.NO_ENGINE == "none"
     assert "user namespaces" in choice.reason and "seccomp filter" in choice.reason
 
 
-def test_the_same_error_from_every_ns_probe_appears_once(home, monkeypatch):
+def test_the_same_error_from_every_ns_probe_appears_once(home, monkeypatch, tmp_path):
     monkeypatch.delenv("XCODON_ENGINE", raising=False)
+    monkeypatch.setenv("XCRUNNER_UDOCKER", str(tmp_path / "no-udocker"))
     same = {n: {"ok": False, "error": f"{n}: unshare: Operation not permitted"} for n in eng.PROBE_NAMES}
     same[PTRACE_PROBE] = {"ok": False, "error": "ptrace: ptrace(PTRACE_TRACEME) failed: Operation not permitted"}
     monkeypatch.setattr(eng, "run_probes", lambda *a: same)
@@ -87,8 +89,9 @@ def test_ns_working_ignores_a_ptrace_failure(home, monkeypatch):
     assert eng.select_engine(home).name == "ns"
 
 
-def test_create_fails_clearly_and_info_still_reports(home, busybox_image, monkeypatch):
+def test_create_fails_clearly_and_info_still_reports(home, busybox_image, monkeypatch, tmp_path):
     monkeypatch.delenv("XCODON_ENGINE", raising=False)
+    monkeypatch.setenv("XCRUNNER_UDOCKER", str(tmp_path / "no-udocker"))  # a host without udocker
     monkeypatch.setattr(eng, "run_probes", lambda *a: _probes(False, False, "ptrace: seccomp filter"))
     monkeypatch.setattr("xcodon_runtime.api.select_engine", eng.select_engine)
     rt = Runtime(home.path)

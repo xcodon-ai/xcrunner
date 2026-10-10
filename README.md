@@ -4,7 +4,7 @@ A rootless container runtime for Docker images. It runs the images that
 coala and coala-runtime use on hosts without Docker and without root. It needs
 Python 3.10 or newer; CI tests 3.10, 3.12 and 3.14.
 
-On Linux, xcrunner picks one of two engines by itself:
+On Linux, xcrunner picks an engine by itself:
 
 - **ns**: kernel user namespaces plus overlayfs, no helper binary. Native
   speed. Needs a Linux kernel 5.11 or newer with unprivileged user namespaces
@@ -12,10 +12,10 @@ On Linux, xcrunner picks one of two engines by itself:
 - **proot**: a vendored static PRoot runs the container under ptrace. Works
   on any Linux that allows ptrace, slower, and creation copies the image rootfs.
 
-A host that blocks both, with user namespaces off and ptrace blocked by Yama
-(`ptrace_scope` 2 or 3) or by a seccomp filter from a container or sandbox, has no
-engine. `xcrunner info` then reports `"engine": "none"` and why, and creating a
-container fails with the same reason.
+- **udocker**: for hosts that block both, see [Hosts that block namespaces and
+  ptrace](#hosts-that-block-namespaces-and-ptrace).
+
+`xcrunner info` shows which engine the host gets and why.
 
 On an Apple silicon Mac, xcrunner runs the Linux xcrunner inside a Lima VM; see
 [macOS](#macos).
@@ -204,6 +204,44 @@ image and give it the local name.
 After that, `FROM coala-runtime-python:latest` uses the stored image and
 never goes to the network. xcrunner does not map image names itself.
 
+## Hosts that block namespaces and ptrace
+
+Some HPC nodes allow neither engine, and the admins may not change that. Ubuntu's
+`kernel.apparmor_restrict_unprivileged_userns=1` refuses user namespaces, and Yama's
+`ptrace_scope` 2 or 3, or a seccomp filter, refuses PRoot's ptrace. Apptainer does not
+help there: a user install of it needs user namespaces too.
+
+The udocker engine needs neither. It runs images through
+[udocker](https://github.com/indigo-dc/udocker)'s Fakechroot mode: a preloaded
+library maps file paths into the container, and each program is patched once to use
+the container's own loader and libraries. Install the extra, and xcrunner picks it when
+the other two engines are blocked:
+
+    pip install 'xcrunner[udocker]'
+    xcrunner info                 # "engine": "udocker"
+    xcrunner run --rm hubentu/coala-runtime-python python -c 'import numpy'
+
+- `XCODON_ENGINE=udocker` forces it on any host.
+- udocker keeps its tools in `UDOCKER_DIR`, by default `~/.udocker`. The first
+  container runs `udocker install` when they are missing, which needs network access
+  once. On a compute node without network, run `udocker install` on a login node first.
+- Each container is a full copy of the image, patched once; that takes about a second
+  for a slim image. With `--env-dir`, the copy lives in the env folder and is reused.
+- coala, cwltool, coala-runtime and the docker shim keep calling xcrunner unchanged.
+
+Limits:
+
+- Statically linked programs, and programs that bypass the C library, do not run.
+  The image's system needs a library build in udocker's tools (Debian, Ubuntu,
+  AlmaLinux, Alpine and others).
+- No isolation. Commands run as your own user; setuid does not work.
+- Read-only binds are mounted writable, with a warning.
+- `xcrunner commit` is refused: the copy holds patched programs that would not run
+  elsewhere.
+
+A host with no usable engine at all reports `"engine": "none"` in `xcrunner info`, and
+creating a container fails with the same reason.
+
 ## Clusters with shared storage
 
 Overlayfs cannot write its upper layer to NFS, Lustre or GPFS. When the home is on
@@ -272,6 +310,8 @@ on a Mac.
 | `XCODON_ENGINE` | `ns` or `proot`. Skips probing. |
 | `XCODON_PROOT` | Path to a PRoot binary. |
 | `XCODON_PROOT_ARGS` | Extra PRoot flags, for example `-k 5.15.0`. |
+| `XCRUNNER_UDOCKER` | Path to the udocker command. Default: beside the running Python, then on PATH. |
+| `XCRUNNER_UDOCKER_MODE` | udocker's Fakechroot mode, `F1` to `F4`. Default `F3`. |
 | `PROOT_*` | PRoot's own settings, such as `PROOT_TMP_DIR` and `PROOT_NO_SECCOMP`, are passed on to PRoot. |
 | `XCRUNNER_MICROMAMBA` | A micromamba binary for the conda shim, instead of the pinned download. |
 | `XCODON_LOG` | `info` or `debug`. |

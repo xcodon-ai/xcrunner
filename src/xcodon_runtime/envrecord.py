@@ -271,7 +271,9 @@ def _layer_entry(env_dir: Path, image_id: str, store) -> tuple[str, dict | None]
     layer = env_layer_dir(env_dir, image_id)
     has_upper = (layer / "upper").is_dir()
     has_rootfs = (layer / "rootfs").is_dir()
-    if not has_upper and not has_rootfs:
+    udocker_root = layer / "udocker" / "c" / "ROOT"  # the udocker engine's copy (spec 17.2)
+    has_udocker = udocker_root.is_dir()
+    if not has_upper and not has_rootfs and not has_udocker:
         # No writable layer left for this folder (or it never had one): drop
         # any stale entry rather than keep describing packages that no
         # longer have a layer behind them.
@@ -285,8 +287,10 @@ def _layer_entry(env_dir: Path, image_id: str, store) -> tuple[str, dict | None]
     base = store.package_inventory(image)
     if has_upper:
         merged, engine = ns_layer_packages(layer / "upper", base), "ns"
-    else:
+    elif has_rootfs:
         merged, engine = scan_tree(layer / "rootfs"), "proot"
+    else:
+        merged, engine = scan_tree(udocker_root), "udocker"
     ref = info.get("image_ref")
     return "set", {"ref": ref if isinstance(ref, str) else None,
                    "engine": info.get("engine") if isinstance(info.get("engine"), str) else engine,

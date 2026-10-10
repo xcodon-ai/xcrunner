@@ -32,6 +32,11 @@ from xcodon_runtime.spec import build_spec
 
 log = logging.getLogger(__name__)
 
+# F3 rewrites every binary's ELF header in the udocker copy, so a diff against the
+# image would capture patched files that run nowhere else (spec 17.4).
+UDOCKER_COMMIT_REFUSED = ("commit is not supported on the udocker engine: its Fakechroot mode patches "
+                          "the binaries in the container copy, so the snapshot would not run elsewhere")
+
 # How long an exited container survives `prune --all`.
 CONTAINER_MAX_AGE = timedelta(days=1)
 
@@ -303,6 +308,8 @@ class Runtime:
         env_lock_fd: int | None = None
         try:
             if container is not None:
+                if container.engine == "udocker":
+                    raise XcodonError(UDOCKER_COMMIT_REFUSED)
                 base = self.images.require(container.image_id)
                 if container.state == "running" and self._engine(container).is_running(container):
                     raise XcodonError(f"container {container.short_id} is running; stop it before commit")
@@ -322,6 +329,8 @@ class Runtime:
                 layer = env_layer_dir(str(env_dir), base.id)
                 if not layer.is_dir():
                     raise XcodonError(f"no env layer for image {base.short_id} under {env_dir}")
+                if not (layer / "upper").is_dir() and not (layer / "rootfs").is_dir() and (layer / "udocker").is_dir():
+                    raise XcodonError(UDOCKER_COMMIT_REFUSED)
                 env_lock_fd = _lock_env_layer(layer)
                 binds = []  # unknown here; the keeper's fixed mounts are still dropped
                 source = ("upper", layer / "upper") if (layer / "upper").is_dir() else ("rootfs", layer / "rootfs")
