@@ -172,3 +172,94 @@ def test_env_dir_is_validated_at_construction(home, tmp_path, monkeypatch):
         XcodonContainerManager(home.path)
     monkeypatch.setenv("XCRUNNER_ENV_DIR", "")
     assert XcodonContainerManager(home.path).env_dir is None
+
+
+class _FakeImages:
+    """Records what the adapter asked the store to do."""
+
+    def __init__(self, present=()):
+        self.present = set(present)
+        self.pulled: list[str] = []
+        self.tagged: list[tuple[str, str]] = []
+        self.resolved: list[str] = []
+
+    def get(self, ref):
+        return object() if ref in self.present else None
+
+    def pull(self, ref):
+        self.pulled.append(ref)
+        self.present.add(ref)
+        return object()
+
+    def tag(self, ref, new_ref):
+        self.tagged.append((ref, new_ref))
+        self.present.add(new_ref)
+        return object()
+
+
+class _FakeRuntime:
+    def __init__(self, images):
+        self.images = images
+
+    def resolve_image(self, ref):
+        self.images.resolved.append(ref)
+        return self.images.pull(ref)
+
+
+def _manager_with(images, registry_source=None):
+    m = XcodonContainerManager.__new__(XcodonContainerManager)
+    m.runtime = _FakeRuntime(images)
+    m.containers = {}
+    m.env_dir = None
+    m.registry_source = registry_source
+    return m
+
+
+_SOURCES = {"coala-runtime-python:latest": "hubentu/coala-runtime-python:latest"}
+
+
+def test_a_local_tag_is_pulled_from_its_published_source_and_tagged():
+    """A bare executor tag resolves to docker.io/library/… and serves no image."""
+    images = _FakeImages()
+    m = _manager_with(images, registry_source=_SOURCES.get)
+    asyncio.run(m.ensure_image("coala-runtime-python:latest"))
+    assert images.pulled == ["hubentu/coala-runtime-python:latest"]
+    assert images.tagged == [("hubentu/coala-runtime-python:latest", "coala-runtime-python:latest")]
+    assert images.resolved == [], "the local name must never be fetched verbatim"
+
+
+def test_an_image_already_in_the_store_is_left_alone():
+    images = _FakeImages(present={"coala-runtime-python:latest"})
+    m = _manager_with(images, registry_source=_SOURCES.get)
+    asyncio.run(m.ensure_image("coala-runtime-python:latest"))
+    assert images.pulled == [] and images.tagged == [] and images.resolved == []
+
+
+def test_an_unmapped_image_keeps_the_plain_resolve():
+    images = _FakeImages()
+    m = _manager_with(images, registry_source=_SOURCES.get)
+    asyncio.run(m.ensure_image("quay.io/biocontainers/samtools:1.19"))
+    assert images.resolved == ["quay.io/biocontainers/samtools:1.19"]
+    assert images.tagged == []
+
+
+def test_without_a_mapping_behaviour_is_unchanged():
+    images = _FakeImages()
+    m = _manager_with(images)  # no registry_source: older callers
+    asyncio.run(m.ensure_image("coala-runtime-python:latest"))
+    assert images.resolved == ["coala-runtime-python:latest"]
+    assert images.tagged == []
+
+
+def test_a_broken_mapping_does_not_break_the_run():
+    def boom(_ref):
+        raise RuntimeError("mapping unavailable")
+
+    images = _FakeImages()
+    m = _manager_with(images, registry_source=boom)
+    asyncio.run(m.ensure_image("coala-runtime-python:latest"))
+    assert images.resolved == ["coala-runtime-python:latest"]
+
+
+def test_the_constructor_accepts_a_registry_source():
+    assert "registry_source" in inspect.signature(XcodonContainerManager.__init__).parameters

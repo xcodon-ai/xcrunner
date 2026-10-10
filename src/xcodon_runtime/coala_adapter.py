@@ -12,7 +12,7 @@ import functools
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
+from typing import Callable, Dict, Optional, Sequence, Union
 
 from xcodon_runtime.api import Runtime
 from xcodon_runtime.condaroot import ENV_DIR_VAR
@@ -96,14 +96,49 @@ class XcodonContainerManager:
     system_site_packages_writable: bool = True
 
     def __init__(self, home: Path | str | None = None, engine: str | None = None,
-                 env_dir: str | None = None) -> None:
+                 env_dir: str | None = None,
+                 registry_source: Callable[[str], str | None] | None = None) -> None:
         self.runtime = Runtime(home, engine=engine)
         self.env_dir = _check_env_dir(env_dir, "env_dir") if env_dir is not None else (
             _check_env_dir(os.environ.get(ENV_DIR_VAR) or None, ENV_DIR_VAR))
         self.containers: Dict[str, Container] = {}
+        self.registry_source = registry_source
+
+    def _registry_source(self, image: str) -> str | None:
+        """Where to fetch ``image`` from when it is a local tag no registry serves, else None.
+
+        The caller supplies the mapping — this module still imports nothing from coala-runtime.
+        A caller that passes nothing keeps the old behaviour.
+        """
+        if self.registry_source is None:
+            return None
+        try:
+            source = self.registry_source(image)
+        except Exception:  # noqa: BLE001 - a caller's mapping must not break the run
+            log.debug("registry_source(%s) failed; using the reference as given", image,
+                      exc_info=True)
+            return None
+        return source if isinstance(source, str) and source.strip() else None
 
     async def ensure_image(self, image: str) -> None:
-        await _call(self.runtime.resolve_image, image)
+        """Make ``image`` usable, fetching it from its published source when it is a local tag.
+
+        ``resolve_image`` pulls an absent reference verbatim, and an unqualified name resolves
+        to ``docker.io/library/<name>`` — the official-images namespace. coala-runtime's
+        executor tags (``coala-runtime-python:latest``) live there under nobody, so the fetch
+        404d on a host that had never built or pulled them. When the caller knows a published
+        source, pull that and store it under the name the caller uses, so later calls and the
+        caller's own default-image comparison still see one name.
+        """
+        if await _call(self.runtime.images.get, image) is not None:
+            return
+        source = self._registry_source(image)
+        if source is None or source == image:
+            await _call(self.runtime.resolve_image, image)
+            return
+        log.info("image %s is a local tag; pulling %s and tagging it as %s", image, source, image)
+        await _call(self.runtime.images.pull, source)
+        await _call(self.runtime.images.tag, source, image)
 
     async def create_container(
         self,
