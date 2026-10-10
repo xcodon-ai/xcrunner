@@ -18,6 +18,11 @@ from pathlib import Path
 from xcodon_runtime import syscalls as sc
 
 PROBE_NAMES = ("userns", "overlay", "pidns_proc")
+# Not an ns probe: whether PRoot can run here at all. PRoot is built on ptrace,
+# which Yama (ptrace_scope 2 or 3) or a seccomp filter can block outright.
+PTRACE_PROBE = "ptrace"
+ALL_PROBES = (*PROBE_NAMES, PTRACE_PROBE)
+_PTRACE_TRACEME = 0
 
 
 def _enter_userns() -> None:
@@ -76,7 +81,43 @@ def _probe_pidns_proc(home: Path, containers: Path) -> None:
         raise OSError(f"proc mount inside a new pid namespace failed (child exit {code})")
 
 
-_PROBES = {"userns": _probe_userns, "overlay": _probe_overlay, "pidns_proc": _probe_pidns_proc}
+def _ptrace_blocker() -> str:
+    """Why ptrace is blocked here, as far as /proc shows it."""
+    try:
+        scope = int(Path("/proc/sys/kernel/yama/ptrace_scope").read_text())
+    except (OSError, ValueError):
+        scope = None
+    if scope is not None and scope >= 2:
+        return f"Yama ptrace_scope is {scope}, which blocks ptrace for normal users"
+    try:
+        status = dict(line.split(":\t", 1) for line in Path("/proc/self/status").read_text().splitlines()
+                      if ":\t" in line)
+    except OSError:
+        status = {}
+    if status.get("Seccomp", "").strip() == "2":
+        return ("a seccomp filter on this process blocks it, usually from a container, job sandbox "
+                "or agent sandbox around this shell")
+    return "the cause is not visible in /proc"
+
+
+def _probe_ptrace(home: Path, containers: Path) -> None:
+    """PRoot's first step: a child asks to be traced by its parent."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    pid = os.fork()
+    if pid == 0:
+        rc = libc.ptrace(_PTRACE_TRACEME, 0, None, None)
+        os._exit(0 if rc == 0 else min(ctypes.get_errno(), 255) or 255)
+    _, status = os.waitpid(pid, 0)
+    code = os.waitstatus_to_exitcode(status)
+    if code != 0:
+        err = os.strerror(code) if 0 < code < 255 else f"exit {code}"
+        raise OSError(code, f"ptrace(PTRACE_TRACEME) failed: {err}; {_ptrace_blocker()}")
+
+
+_PROBES = {"userns": _probe_userns, "overlay": _probe_overlay, "pidns_proc": _probe_pidns_proc,
+           PTRACE_PROBE: _probe_ptrace}
 
 
 def run_probes(home_path: Path | None = None, containers_path: Path | None = None) -> dict[str, dict]:
@@ -84,7 +125,7 @@ def run_probes(home_path: Path | None = None, containers_path: Path | None = Non
 
     home = RuntimeHome(home_path, containers=containers_path)
     results: dict[str, dict] = {}
-    for name in PROBE_NAMES:
+    for name in ALL_PROBES:
         try:
             r = subprocess.run(
                 [sys.executable, "-m", "xcodon_runtime.probe", name, str(home.path), str(home.containers)],
@@ -100,7 +141,7 @@ def run_probes(home_path: Path | None = None, containers_path: Path | None = Non
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) not in (2, 3) or argv[0] not in _PROBES:
-        print(f"usage: python -m xcodon_runtime.probe {{{'|'.join(PROBE_NAMES)}}} HOME [CONTAINER_DIR]",
+        print(f"usage: python -m xcodon_runtime.probe {{{'|'.join(ALL_PROBES)}}} HOME [CONTAINER_DIR]",
               file=sys.stderr)
         return 2
     home = Path(argv[1])

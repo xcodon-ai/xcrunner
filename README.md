@@ -10,7 +10,12 @@ On Linux, xcrunner picks one of two engines by itself:
   speed. Needs a Linux kernel 5.11 or newer with unprivileged user namespaces
   enabled. Most workstations, cloud VMs, and current HPC nodes qualify.
 - **proot**: a vendored static PRoot runs the container under ptrace. Works
-  on any Linux, slower, and creation copies the image rootfs.
+  on any Linux that allows ptrace, slower, and creation copies the image rootfs.
+
+A host that blocks both, with user namespaces off and ptrace blocked by Yama
+(`ptrace_scope` 2 or 3) or by a seccomp filter from a container or sandbox, has no
+engine. `xcrunner info` then reports `"engine": "none"` and why, and creating a
+container fails with the same reason.
 
 On an Apple silicon Mac, xcrunner runs the Linux xcrunner inside a Lima VM; see
 [macOS](#macos).
@@ -267,6 +272,7 @@ on a Mac.
 | `XCODON_ENGINE` | `ns` or `proot`. Skips probing. |
 | `XCODON_PROOT` | Path to a PRoot binary. |
 | `XCODON_PROOT_ARGS` | Extra PRoot flags, for example `-k 5.15.0`. |
+| `PROOT_*` | PRoot's own settings, such as `PROOT_TMP_DIR` and `PROOT_NO_SECCOMP`, are passed on to PRoot. |
 | `XCRUNNER_MICROMAMBA` | A micromamba binary for the conda shim, instead of the pinned download. |
 | `XCODON_LOG` | `info` or `debug`. |
 | `XCRUNNER_MACHINE_LINUX_TEST` | Testing only: `1` makes a Linux host act as the Mac side, against a Lima QEMU VM. |

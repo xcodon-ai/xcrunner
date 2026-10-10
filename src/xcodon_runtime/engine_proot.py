@@ -211,7 +211,10 @@ class ProotEngine:
             cmd += ["-b", f"{b.source}:{b.target}"]
         cmd += shlex.split(os.environ.get("XCODON_PROOT_ARGS", ""))
         cmd += argv
-        return subprocess.Popen(cmd, env=env, **popen_kwargs)
+        # PRoot reads its own settings (PROOT_NO_SECCOMP, PROOT_TMP_DIR, PROOT_VERBOSE, ...)
+        # from its environment, which is otherwise the container's.
+        proot_env = {k: v for k, v in os.environ.items() if k.startswith("PROOT_")}
+        return subprocess.Popen(cmd, env={**env, **proot_env}, **popen_kwargs)
 
     def stop(self, container: Container) -> None:
         """Remove the started marker. The copied rootfs stays, so a restart is free."""

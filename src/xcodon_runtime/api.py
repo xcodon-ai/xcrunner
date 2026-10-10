@@ -20,10 +20,10 @@ from typing import Callable, Mapping, Sequence
 from xcodon_runtime import __version__, envrecord
 from xcodon_runtime.containers import Container, ContainerStore, _rmtree_tolerant
 from xcodon_runtime.daemon import DaemonSource
-from xcodon_runtime.engine import Bind, Engine, EngineChoice, get_engine, select_engine
+from xcodon_runtime.engine import NO_ENGINE, Bind, Engine, EngineChoice, get_engine, select_engine
 from xcodon_runtime.engine_proot import find_proot
 from xcodon_runtime.envdir import ENV_LOCK_NAME, env_layer_dir
-from xcodon_runtime.errors import ContainerNotRunning, ImageNotFound, XcodonError
+from xcodon_runtime.errors import ContainerNotRunning, EngineUnavailable, ImageNotFound, XcodonError
 from xcodon_runtime.home import RuntimeHome
 from xcodon_runtime.imagestore import Image, ImageStore
 from xcodon_runtime.layerdiff import drop_mount_placeholders, snapshot_diff, snapshot_upper
@@ -200,7 +200,10 @@ class Runtime:
             env_dir_s = str(env_dir)
             if not os.path.isabs(env_dir_s):
                 raise XcodonError(f"env_dir must be an absolute path: {env_dir_s}")
-        engine = self.engine_choice().name
+        choice = self.engine_choice()
+        if choice.name == NO_ENGINE:
+            raise EngineUnavailable(choice.reason)
+        engine = choice.name
         c = self.store.create(container_id, image, ref, spec, list(binds), engine, name, env_dir=env_dir_s)
         if env_dir_s is not None:
             Path(env_dir_s).mkdir(parents=True, exist_ok=True)

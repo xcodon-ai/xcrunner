@@ -10,13 +10,15 @@ from typing import TYPE_CHECKING, Protocol
 
 from xcodon_runtime.errors import EngineUnavailable
 from xcodon_runtime.home import CONTAINER_DIR_ENV, RuntimeHome, container_lock_in
-from xcodon_runtime.probe import PROBE_NAMES, run_probes
+from xcodon_runtime.probe import PROBE_NAMES, PTRACE_PROBE, run_probes
 
 if TYPE_CHECKING:
     from xcodon_runtime.containers import Container
 
 log = logging.getLogger(__name__)
 ENGINE_NAMES = ("ns", "proot")
+# What select_engine reports when neither engine can run on this host.
+NO_ENGINE = "none"
 
 
 @dataclass(frozen=True)
@@ -78,8 +80,27 @@ def select_engine(home: RuntimeHome, override: str | None = None) -> EngineChoic
     if failed == ["overlay"]:
         reason += (f" (the container dir {home.containers} or the image store may be on a filesystem "
                    f"overlayfs cannot use, such as NFS; set {CONTAINER_DIR_ENV} to a local disk)")
+    ptrace = probes.get(PTRACE_PROBE, {"ok": True, "error": ""})
+    if not ptrace["ok"]:
+        both = (f"no engine can run on this host. The ns engine needs unprivileged user namespaces: "
+                f"{_problems(probes, failed)}. The proot engine needs ptrace: "
+                f"{_problems(probes, [PTRACE_PROBE])}. Ask the admins to allow unprivileged user "
+                "namespaces, or run xcrunner outside the sandbox or container this shell is in")
+        log.info("%s", both)  # create() raises it; logging it as a warning would print it twice
+        return EngineChoice(NO_ENGINE, probes, both)
     log.info("ns engine unavailable (%s); using proot", reason)
     return EngineChoice("proot", probes, reason)
+
+
+def _problems(probes: dict, names: list[str]) -> str:
+    """The probes' errors without their "name: " prefixes, each distinct error once."""
+    seen: list[str] = []
+    for n in names:
+        err = probes[n]["error"] or "failed"
+        err = err[len(n) + 2:] if err.startswith(f"{n}: ") else err
+        if err not in seen:
+            seen.append(err)
+    return "; ".join(seen)
 
 
 def get_engine(name: str) -> Engine:
