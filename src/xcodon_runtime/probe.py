@@ -25,12 +25,43 @@ ALL_PROBES = (*PROBE_NAMES, PTRACE_PROBE)
 _PTRACE_TRACEME = 0
 
 
+PROC_SYS = Path("/proc/sys")
+
+
+def _read_int(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _userns_blocker() -> str:
+    """The sysctl that blocks unprivileged user namespaces here, or "" when none is visible."""
+    if _read_int(PROC_SYS / "kernel" / "apparmor_restrict_unprivileged_userns") == 1:
+        # unshare() itself succeeds, but the new namespace has no capabilities,
+        # so writing uid_map fails with EPERM (Ubuntu 23.10 and newer by default).
+        return ("AppArmor restricts unprivileged user namespaces "
+                "(kernel.apparmor_restrict_unprivileged_userns=1); the admins can set it to 0, or add "
+                f"an AppArmor profile with 'userns,' for xcrunner's Python, {os.path.realpath(sys.executable)}")
+    if _read_int(PROC_SYS / "user" / "max_user_namespaces") == 0:
+        return "user.max_user_namespaces is 0, which turns user namespaces off"
+    if _read_int(PROC_SYS / "kernel" / "unprivileged_userns_clone") == 0:
+        return "kernel.unprivileged_userns_clone is 0, which turns unprivileged user namespaces off"
+    return ""
+
+
 def _enter_userns() -> None:
     # Capture the real host ids before unshare(): once CLONE_NEWUSER takes
     # effect, os.getuid()/getgid() report the unmapped overflow id instead.
     host_uid, host_gid = os.getuid(), os.getgid()
-    sc.unshare(sc.CLONE_NEWUSER | sc.CLONE_NEWNS)
-    sc.write_id_maps(0, 0, host_uid, host_gid)
+    try:
+        sc.unshare(sc.CLONE_NEWUSER | sc.CLONE_NEWNS)
+        sc.write_id_maps(0, 0, host_uid, host_gid)
+    except OSError as e:
+        blocker = _userns_blocker()
+        if blocker:
+            raise OSError(f"{e}; {blocker}") from e
+        raise
     sc.mount(None, "/", None, sc.MS_REC | sc.MS_PRIVATE)
 
 
