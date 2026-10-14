@@ -252,3 +252,11 @@ def test_rmi_reports_untagged_and_deleted(home, busybox_image, capfd):
     assert out == ["Untagged: docker.io/xcodon-test/busybox:latest", f"Deleted: sha256:{busybox_image.id}"]
     assert cli_mod.main(["rmi", "xcodon-test/busybox"]) == 125
     assert "run: xcrunner pull" in capfd.readouterr().err
+
+
+def test_a_mount_source_that_does_not_exist_is_refused(home, capsys, tmp_path):
+    """Docker refuses it; skipping it left an empty mountpoint and no reason."""
+    code = cli.main(["run", "--rm", f"--mount=type=bind,source={tmp_path}/missing,target=/x",
+                     "xcodon-test/busybox", "true"])
+    assert code == 125
+    assert "bind source path does not exist" in capsys.readouterr().err

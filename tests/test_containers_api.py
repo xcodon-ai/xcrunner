@@ -256,3 +256,25 @@ def test_prune_all_removes_only_old_exited_containers(rt):
     assert old.dir in removed
     assert [c.name for c in rt.containers(all=True)] == ["recent"]
     rt.remove(fresh)
+
+
+def test_a_bind_through_a_symlinked_folder_is_mounted(rt, tmp_path):
+    """cwltool hands over `inputs/data/raw/x.fastq` where `inputs/data` links elsewhere. After
+    pivot_root the link resolved inside the container, so the bind was skipped and Cell Ranger
+    found no FASTQs."""
+    shared = tmp_path / "shared" / "raw"
+    shared.mkdir(parents=True)
+    (shared / "x.fastq").write_text("@read1\n")
+    project = tmp_path / "project" / "inputs"
+    project.mkdir(parents=True)
+    (project / "data").symlink_to(tmp_path / "shared")
+    via_link = str(project / "data" / "raw" / "x.fastq")
+    c = rt.create("xcodon-test/busybox", command=["/bin/sh"],
+                  binds=[Bind(via_link, "/out/S_S1_L001_R1_001.fastq", True)])
+    assert c.binds[0].source == str(shared / "x.fastq")
+    rt.start(c)
+    try:
+        out = rt.exec(c, ["cat", "/out/S_S1_L001_R1_001.fastq"])
+        assert (out.code, out.stdout) == (0, b"@read1\n")
+    finally:
+        rt.remove(c, force=True)

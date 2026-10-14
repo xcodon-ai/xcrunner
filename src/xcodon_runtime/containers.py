@@ -17,6 +17,17 @@ from xcodon_runtime.spec import ProcessSpec
 CONFIG_NAME = "config.json"
 
 
+def _host_real(bind: Bind) -> Bind:
+    """The bind with its source resolved on the host, as Docker resolves it.
+
+    The keeper mounts sources after ``pivot_root``, from the old root. An absolute symlink on the
+    way to a source (``inputs/data -> /shared/dataset``) then resolves inside the container, so
+    the source looked missing and the mount was skipped: Cell Ranger, handed its FASTQs that way
+    by cwltool, found none.
+    """
+    return Bind(os.path.realpath(bind.source), bind.target, bind.readonly)
+
+
 @dataclass
 class Container:
     id: str
@@ -107,7 +118,7 @@ class ContainerStore:
             c = Container(
                 id=container_id, image_id=image.id, image_ref=image_ref, image_rootfs=str(image.rootfs),
                 engine=engine, argv=spec.argv, env=spec.env, workdir=spec.workdir, uid=spec.uid, gid=spec.gid,
-                binds=list(binds), created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                binds=[_host_real(b) for b in binds], created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 name=name, env_dir=env_dir, dir=cdir,
             )
             c.save()

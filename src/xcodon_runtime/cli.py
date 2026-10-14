@@ -51,6 +51,8 @@ class RunOptions:
     image: str = ""
     command: list[str] = field(default_factory=list)
     binds: list[Bind] = field(default_factory=list)
+    # Sources given with --mount, which Docker requires to exist (-v creates a missing one).
+    mount_sources: list[str] = field(default_factory=list)
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     entrypoint: list[str] | None = None
@@ -139,6 +141,7 @@ def parse_run_args(tokens: list[str]) -> RunOptions:
             continue
         if flag == "--mount":
             opts.binds.append(_parse_mount(value))
+            opts.mount_sources.append(opts.binds[-1].source)
         elif flag in ("-v", "--volume"):
             opts.binds.append(_parse_volume(value))
         elif flag in ("-w", "--workdir"):
@@ -340,12 +343,22 @@ def cmd_rmi(rt: Runtime, args) -> int:
     return 0
 
 
+def _require_mount_sources(opts: RunOptions) -> None:
+    """Refuse a --mount whose source is missing, as Docker does. The keeper skipped such a bind,
+    leaving an empty mountpoint and a tool that reported its input missing with nothing saying
+    why."""
+    for src in opts.mount_sources:
+        if not os.path.exists(src):
+            raise UsageError(f'invalid mount config for type "bind": bind source path does not exist: {src}')
+
+
 def cmd_run(rt: Runtime, args) -> int:
     if args.rest[:1] in (["-h"], ["--help"]):
         print(RUN_USAGE.format(cmd="run"))
         return 0
     opts = parse_run_args(args.rest)
     _warn_ignored(opts)
+    _require_mount_sources(opts)
     return rt.run(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
                   workdir=opts.workdir, env=opts.env, user=opts.user, name=opts.name, rm=opts.rm,
                   pull=opts.pull, cidfile=opts.cidfile, env_dir=opts.env_dir)
@@ -357,6 +370,7 @@ def cmd_create(rt: Runtime, args) -> int:
         return 0
     opts = parse_run_args(args.rest)
     _warn_ignored(opts)
+    _require_mount_sources(opts)
     c = rt.create(opts.image, command=opts.command or None, entrypoint=opts.entrypoint, binds=opts.binds,
                   workdir=opts.workdir, env=opts.env, user=opts.user, name=opts.name, pull=opts.pull,
                   env_dir=opts.env_dir)
