@@ -26,6 +26,15 @@ log = logging.getLogger(__name__)
 
 UDOCKER_ENV = "XCRUNNER_UDOCKER"
 MODE_ENV = "XCRUNNER_UDOCKER_MODE"
+# Settings a container gets under udocker unless the caller sets them.
+#
+# Fakechroot rewrites the paths a program passes to the C library, but not every entry point:
+# code built against an older glibc, such as the HDF5 inside h5py's wheels, calls stat functions
+# it misses. HDF5's default driver opens a file, then lstat()s its path to resolve symlinks; the
+# open is rewritten and the lstat is not, so every h5py.File and read_h5ad on a bind-mounted path
+# failed with "can't retrieve stat info for file" (in every F mode). The stdio driver skips that
+# check, and HDF5 1.14+ reads its default driver from HDF5_DRIVER.
+GUEST_ENV_DEFAULTS = {"HDF5_DRIVER": "stdio"}
 DEFAULT_MODE = "F3"
 VALID_MODES = ("F1", "F2", "F3", "F4")
 CONTAINER_NAME = "c"
@@ -170,7 +179,7 @@ class UdockerEngine:
             log.warning("udocker engine cannot enforce read-only binds; %s is writable", ", ".join(readonly))
         cmd = [sys.executable, "-m", "xcodon_runtime.groupexec", "--", self._udocker(), "--quiet", "run",
                "--nobanner", "--nometa", f"--workdir={workdir}"]
-        cmd += [f"--env={k}={v}" for k, v in env.items()]
+        cmd += [f"--env={k}={v}" for k, v in {**GUEST_ENV_DEFAULTS, **env}.items()]
         cmd += [f"--volume={b.source}:{b.target}" for b in container.binds]
         cmd += [CONTAINER_NAME, *argv]
         return subprocess.Popen(cmd, env=self._env(container), **popen_kwargs)

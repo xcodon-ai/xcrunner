@@ -242,3 +242,18 @@ def test_real_udocker_runs_a_debian_image(home, tmp_path, monkeypatch):
     assert code == 3
     assert out.read_text().strip().split(".")[0] == "12"
     assert (data / "x").read_text() == "bar\n"
+
+
+def test_hdf5_uses_the_stdio_driver_unless_the_caller_chooses(rt, fake, tmp_path):
+    """Fakechroot misses the lstat HDF5's default driver makes after opening a file: every
+    h5py.File on a bind-mounted path failed with "can't retrieve stat info for file"."""
+    _, log = fake
+    c = rt.create(REF, command=["/bin/sh"])
+    rt.start(c)
+    rt.exec(c, ["/bin/sh", "-c", "true"])
+    assert "--env=HDF5_DRIVER=stdio" in _calls(log, "run")[-1]["argv"]
+    mine = rt.create(REF, command=["/bin/sh"], env={"HDF5_DRIVER": "sec2"})
+    rt.start(mine)
+    rt.exec(mine, ["/bin/sh", "-c", "true"])
+    argv = _calls(log, "run")[-1]["argv"]
+    assert "--env=HDF5_DRIVER=sec2" in argv and "--env=HDF5_DRIVER=stdio" not in argv
