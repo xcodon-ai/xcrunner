@@ -158,6 +158,11 @@ class XcodonContainerManager:
         # The container's main command is never run: the keeper holds the container and
         # every call goes through exec. A harmless default keeps images without CMD usable.
         argv = ["/bin/sh"] if command is None else (["/bin/sh", "-c", command] if isinstance(command, str) else list(command))
+        # coala-runtime creates containers without calling ensure_image first (only its Docker
+        # manager pulls inside its own create). Without this, an absent local tag such as
+        # coala-runtime-python:latest went to runtime.create, which fetched it verbatim from
+        # docker.io/library/ and failed: "could not fetch docker.io/library/coala-runtime-python".
+        await self.ensure_image(image)
         c = await _call(
             self.runtime.create, image, command=argv, binds=binds, workdir=working_dir,
             env=dict(environment or {}), name=name, env_dir=self.env_dir,

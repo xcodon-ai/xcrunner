@@ -279,3 +279,28 @@ def test_describe_container_names_the_engine_and_folder(home, busybox_image, eng
         assert str(home.containers) in line
     finally:
         asyncio.run(mgr.remove_container(c))
+
+
+def test_create_container_fetches_a_local_tag_from_its_published_source():
+    """coala-runtime calls create_container, never ensure_image: the mapping must apply there.
+
+    A scrnaseq run on a udocker host failed every default-image call with "could not fetch
+    docker.io/library/coala-runtime-python:latest", although the mapping had been passed in.
+    """
+    images = _FakeImages()
+    created = []
+
+    class _Runtime(_FakeRuntime):
+        def create(self, image, **kw):
+            assert image in self.images.present, "the image is in the store before create"
+            created.append(image)
+            from types import SimpleNamespace
+
+            return SimpleNamespace(id="c1", short_id="c1", state="created")
+
+    m = _manager_with(images, registry_source=_SOURCES.get)
+    m.runtime = _Runtime(images)
+    asyncio.run(m.create_container("coala-runtime-python:latest", command="true"))
+    assert images.pulled == ["hubentu/coala-runtime-python:latest"]
+    assert images.tagged == [("hubentu/coala-runtime-python:latest", "coala-runtime-python:latest")]
+    assert created == ["coala-runtime-python:latest"]
