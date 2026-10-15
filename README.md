@@ -196,13 +196,16 @@ local daemon, such as `coala-runtime-python:latest`, is looked up on Docker
 Hub and not found there. Seed such base images once: pull the published
 image and give it the local name.
 
-    xcrunner pull hubentu/coala-runtime-python:latest
-    xcrunner tag hubentu/coala-runtime-python:latest coala-runtime-python:latest
-    xcrunner pull hubentu/coala-runtime-r:latest
-    xcrunner tag hubentu/coala-runtime-r:latest coala-runtime-r:latest
+    xcrunner pull ghcr.io/coala-info/coala-runtime-python:latest
+    xcrunner tag ghcr.io/coala-info/coala-runtime-python:latest coala-runtime-python:latest
+    xcrunner pull ghcr.io/coala-info/coala-runtime-r:latest
+    xcrunner tag ghcr.io/coala-info/coala-runtime-r:latest coala-runtime-r:latest
 
 After that, `FROM coala-runtime-python:latest` uses the stored image and
-never goes to the network. xcrunner does not map image names itself.
+never goes to the network. The xcrunner CLI does not map image names itself.
+coala-runtime does it for its own executor images: it hands the coala adapter
+where each local name is published, and the adapter pulls and tags it the first
+time a container needs it.
 
 ## Hosts that block namespaces and ptrace
 
@@ -219,7 +222,7 @@ the other two engines are blocked:
 
     pip install 'xcrunner[udocker]'
     xcrunner info                 # "engine": "udocker"
-    xcrunner run --rm hubentu/coala-runtime-python python -c 'import numpy'
+    xcrunner run --rm ghcr.io/coala-info/coala-runtime-python python -c 'import numpy'
 
 - `XCODON_ENGINE=udocker` forces it on any host.
 - udocker keeps its tools in `UDOCKER_DIR`, by default `~/.udocker`. The first
@@ -236,6 +239,10 @@ Limits:
   AlmaLinux, Alpine and others).
 - No isolation. Commands run as your own user; setuid does not work.
 - Read-only binds are mounted writable, with a warning.
+- Code built against an older glibc can make stat calls Fakechroot does not map, so
+  they look for the container path on the host. HDF5 in h5py's wheels does: its
+  default driver failed every `h5py.File` with "can't retrieve stat info for file".
+  Containers therefore get `HDF5_DRIVER=stdio` unless you set it.
 - `xcrunner commit` is refused: the copy holds patched programs that would not run
   elsewhere.
 
@@ -245,9 +252,15 @@ creating a container fails with the same reason.
 ## Clusters with shared storage
 
 Overlayfs cannot write its upper layer to NFS, Lustre or GPFS. When the home is on
-shared storage, the overlay probe fails and xcrunner falls back to the slower proot
-engine. Keep the image store on shared storage and put container folders on a
-node-local disk:
+shared storage and neither folder below is set, xcrunner tries a private
+`xcrunner-<user>` folder under `/tmp`, then `$TMPDIR`, and uses the first that passes
+the overlay probe and has 10 GB free, for both container folders and env-folder
+layers. The decision is made on the node where containers run and cached per boot;
+`xcrunner info` shows it as `containers_auto`. `XCRUNNER_AUTO_LOCAL_DIRS=0` turns it off.
+Without a usable local disk, xcrunner falls back to the slower proot engine.
+
+To choose the folders yourself, keep the image store on shared storage and put
+container folders on a node-local disk:
 
     export XCODON_RUNTIME_HOME=/shared/$USER/xcrunner
     export XCRUNNER_CONTAINER_DIR=${TMPDIR:-/tmp}/xcrunner-containers
