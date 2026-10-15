@@ -151,22 +151,24 @@ _PROBES = {"userns": _probe_userns, "overlay": _probe_overlay, "pidns_proc": _pr
            PTRACE_PROBE: _probe_ptrace}
 
 
+def run_probe(name: str, home_path: Path, containers_path: Path) -> dict:
+    """``{"ok", "error"}`` for one probe, run in a child process."""
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "xcodon_runtime.probe", name, str(home_path), str(containers_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "probe timed out"}
+    err = (r.stderr.strip().splitlines() or [""])[-1] if r.returncode else ""
+    return {"ok": r.returncode == 0, "error": err}
+
+
 def run_probes(home_path: Path | None = None, containers_path: Path | None = None) -> dict[str, dict]:
     from xcodon_runtime.home import RuntimeHome
 
     home = RuntimeHome(home_path, containers=containers_path)
-    results: dict[str, dict] = {}
-    for name in ALL_PROBES:
-        try:
-            r = subprocess.run(
-                [sys.executable, "-m", "xcodon_runtime.probe", name, str(home.path), str(home.containers)],
-                capture_output=True, text=True, timeout=30,
-            )
-            err = (r.stderr.strip().splitlines() or [""])[-1] if r.returncode else ""
-            results[name] = {"ok": r.returncode == 0, "error": err}
-        except subprocess.TimeoutExpired:
-            results[name] = {"ok": False, "error": "probe timed out"}
-    return results
+    return {name: run_probe(name, home.path, home.containers) for name in ALL_PROBES}
 
 
 def main(argv: list[str] | None = None) -> int:

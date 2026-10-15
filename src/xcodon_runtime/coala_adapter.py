@@ -179,6 +179,20 @@ class XcodonContainerManager:
         result = await _call(self.runtime.exec, _unwrap(container), command, workdir=workdir, env=environment)
         return result.code, result.stdout, result.stderr
 
+    def describe_container(self, container) -> str:
+        """One line for a run's log: what ran this container and where its layers live.
+
+        A failure that depends on the engine (an HDF5 ``lstat`` that failed in one scrnaseq run)
+        could not be traced, because no log said whether ns or PRoot had run it.
+        """
+        from xcodon_runtime import __version__
+
+        c = _unwrap(container)
+        line = f"xcrunner {__version__} · engine {c.engine} · container dir {self.runtime.home.containers}"
+        if self.runtime.auto_dirs_note:
+            line += " (chosen automatically: the default folder cannot hold overlay layers)"
+        return line
+
     async def get_logs(self, container, tail: int = 1000) -> str:
         return await _call(_read_log_tail, _unwrap(container), tail)
 

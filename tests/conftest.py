@@ -46,6 +46,9 @@ def home(tmp_path: Path, monkeypatch) -> RuntimeHome:
     monkeypatch.delenv("XCRUNNER_MACHINE_LINUX_TEST", raising=False)
     monkeypatch.delenv("XCRUNNER_UDOCKER", raising=False)
     monkeypatch.delenv("XCRUNNER_UDOCKER_MODE", raising=False)
+    # A test home sits on a local disk already; without this the auto choice would also probe
+    # and cache under the real /tmp/xcrunner-<user>. test_localdirs.py turns it back on.
+    monkeypatch.setenv("XCRUNNER_AUTO_LOCAL_DIRS", "0")
     return RuntimeHome(root)
 
 

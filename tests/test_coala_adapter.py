@@ -263,3 +263,19 @@ def test_a_broken_mapping_does_not_break_the_run():
 
 def test_the_constructor_accepts_a_registry_source():
     assert "registry_source" in inspect.signature(XcodonContainerManager.__init__).parameters
+
+
+def test_describe_container_names_the_engine_and_folder(home, busybox_image, engine_name):
+    import asyncio
+
+    from xcodon_runtime import __version__
+    from xcodon_runtime.coala_adapter import XcodonContainerManager
+
+    mgr = XcodonContainerManager(home=home.path, engine=engine_name)
+    c = asyncio.run(mgr.create_container("xcodon-test/busybox", command="true"))
+    try:
+        line = mgr.describe_container(c)
+        assert line.startswith(f"xcrunner {__version__} · engine {engine_name} · container dir ")
+        assert str(home.containers) in line
+    finally:
+        asyncio.run(mgr.remove_container(c))

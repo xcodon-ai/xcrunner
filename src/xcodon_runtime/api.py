@@ -79,6 +79,15 @@ def _argv(command: str | Sequence[str] | None, default: list[str]) -> list[str]:
 class Runtime:
     def __init__(self, home: Path | str | None = None, engine: str | None = None) -> None:
         self.home = RuntimeHome(home)
+        # Before the container store exists: on a node whose default container folder cannot
+        # hold overlay layers (NFS), a node-local one turns PRoot into ns (see localdirs.py).
+        self.auto_dirs_note = ""
+        if engine not in ("proot", "udocker"):
+            from xcodon_runtime.localdirs import choose_local_dirs
+
+            self.auto_dirs_note = choose_local_dirs(self.home)
+            if self.auto_dirs_note:
+                self.home = RuntimeHome(home)
         self.images = ImageStore(self.home)
         self.store = ContainerStore(self.home)
         self._engine_override = engine
@@ -475,6 +484,8 @@ class Runtime:
             "version": __version__,
             "home": str(self.home.path),
             "containers": str(self.home.containers),
+            "containers_auto": self.auto_dirs_note,
+            "env_layer_dir": os.environ.get("XCRUNNER_ENV_LAYER_DIR", ""),
             "engine": choice.name,
             "engine_reason": choice.reason,
             "probes": choice.probes,
