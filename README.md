@@ -75,6 +75,20 @@ of failing later with "exec format error". On an ARM host with a Rosetta or
 back to its x86_64 build, and xcrunner prints one warning line.
 `xcrunner pull --platform` skips both.
 
+## Load an image saved with docker
+
+An image that is in no registry, such as one built locally, can be carried as a
+file to a host without docker (an HPC node, for example):
+
+    docker save myimage:1 -o myimage.tar                 # where docker has the image
+    xcrunner load -i myimage.tar                         # on the host without docker
+
+`xcrunner load` reads the file `docker save` writes (Docker 25 or newer), plain
+or gzipped, and stores the image under the name the file records. `--tag NAME:TAG`
+adds a name, and is needed when the file records none. A file holding several
+images is refused: save one image per file. `xcrunner docker load` and
+`docker image load` through the docker shim do the same.
+
 ## Build and commit
 
     xcrunner build -t myapp:1 .                          # runs a Dockerfile subset

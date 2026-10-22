@@ -118,6 +118,10 @@ class Runtime:
     def pull(self, ref: str, platform: Platform | None = None) -> Image:
         return self.images.pull(ref, platform)
 
+    def load(self, stream, tag: str | None = None, platform: Platform | None = None) -> tuple[Image, list[str]]:
+        """Import a `docker save` archive read from ``stream``; returns the image and its refs."""
+        return self.images.load_archive(stream, tag=tag, platform=platform)
+
     def inspect(self, ref: str) -> Image | None:
         return self.images.get(ref)
 

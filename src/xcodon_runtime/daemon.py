@@ -1,4 +1,8 @@
-"""Reuse images from a local Docker daemon through `docker save` (OCI layout)."""
+"""Read `docker save` archives (OCI layout): from a local Docker daemon, or from a file.
+
+The file case is `xcrunner load`: an image built on a machine with Docker (the BixBench3
+sandbox, 5.8 GB, in no registry) carried as a file to a host with none, such as an HPC node.
+"""
 
 from __future__ import annotations
 
@@ -55,10 +59,33 @@ def _read_json_blob(home: RuntimeHome, digest: str) -> dict:
         raise PullError(f"docker save output has malformed JSON in blob {digest}") from e
 
 
-def load_oci_layout_tar(stream: BinaryIO, home: RuntimeHome, platform: Platform) -> FetchedImage:
-    """Read a `docker save` archive from a stream. Blobs land in the home blob store."""
+_NAME_ANNOTATION = "io.containerd.image.name"
+
+
+def _archive_names(manifests: list[dict], legacy: list) -> list[str]:
+    """The image names an archive records, in order, each once.
+
+    Docker 25+ with the containerd store names the image in index.json's
+    ``io.containerd.image.name`` annotation; the classic store, and older layouts,
+    in manifest.json's ``RepoTags``.
+    """
+    names = [m.get("annotations", {}).get(_NAME_ANNOTATION) for m in manifests]
+    for entry in legacy if isinstance(legacy, list) else []:
+        if isinstance(entry, dict):
+            names.extend(entry.get("RepoTags") or [])
+    return list(dict.fromkeys(n for n in names if isinstance(n, str) and n.strip()))
+
+
+def read_image_archive(stream: BinaryIO, home: RuntimeHome, platform: Platform) -> tuple[FetchedImage, list[str]]:
+    """Read a `docker save` archive (plain or compressed) from a stream.
+
+    Returns the image for ``platform`` and the names the archive records for it.
+    Blobs land in the home blob store. An archive of several different images is
+    refused: which one a name belongs to is not reliable across docker versions.
+    """
     index: dict | None = None
-    with tarfile.open(fileobj=stream, mode="r|") as tar:
+    legacy: list = []
+    with tarfile.open(fileobj=stream, mode="r|*") as tar:
         for member in tar:
             if member.name in ("index.json", "./index.json"):
                 f = tar.extractfile(member)
@@ -67,6 +94,13 @@ def load_oci_layout_tar(stream: BinaryIO, home: RuntimeHome, platform: Platform)
                         index = json.load(f)
                     except ValueError as e:
                         raise PullError("docker save output has malformed JSON in index.json") from e
+            elif member.name in ("manifest.json", "./manifest.json"):
+                f = tar.extractfile(member)
+                if f:
+                    try:
+                        legacy = json.load(f)
+                    except ValueError:
+                        legacy = []  # only names come from it; index.json is the authority
             elif member.isfile() and "blobs/sha256/" in member.name:
                 _store_blob(tar, member, home)
     if index is None:
@@ -75,6 +109,10 @@ def load_oci_layout_tar(stream: BinaryIO, home: RuntimeHome, platform: Platform)
     manifests = index.get("manifests") or []
     if not manifests:
         raise PullError("docker save index.json lists no manifests")
+    named = {m.get("annotations", {}).get(_NAME_ANNOTATION) for m in manifests} - {None}
+    if len({m.get("digest") for m in manifests}) > 1 and len(named) > 1:
+        raise PullError(f"the archive holds {len(named)} images ({', '.join(sorted(named))}); "
+                        "save one image per file")
     if len(manifests) == 1:
         desc = manifests[0]
     else:
@@ -99,7 +137,12 @@ def load_oci_layout_tar(stream: BinaryIO, home: RuntimeHome, platform: Platform)
     for l in layers:
         if not l.blob_path.exists():
             raise PullError(f"docker save output is missing layer {l.digest}")
-    return FetchedImage(config_digest, config, layers, source="daemon")
+    return FetchedImage(config_digest, config, layers, source="daemon"), _archive_names(manifests, legacy)
+
+
+def load_oci_layout_tar(stream: BinaryIO, home: RuntimeHome, platform: Platform) -> FetchedImage:
+    """Read a `docker save` archive from a stream. Blobs land in the home blob store."""
+    return read_image_archive(stream, home, platform)[0]
 
 
 class DaemonSource:

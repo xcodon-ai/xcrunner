@@ -237,10 +237,11 @@ DOCKER_VERBS = {
     "build": ["build"], "pull": ["pull"], "images": ["images"], "rmi": ["rmi"], "tag": ["tag"],
     "run": ["run"], "create": ["create"], "start": ["start"], "exec": ["exec"], "stop": ["stop"],
     "rm": ["rm"], "ps": ["ps"], "logs": ["logs"], "commit": ["commit"], "inspect": ["inspect"],
-    "version": ["info"], "info": ["info"],
+    "version": ["info"], "info": ["info"], "load": ["load"],
 }
 # `docker image <verb>` has its own, smaller, vocabulary.
-DOCKER_IMAGE_VERBS = {"inspect": ["inspect"], "ls": ["images"], "list": ["images"], "rm": ["rmi"], "remove": ["rmi"]}
+DOCKER_IMAGE_VERBS = {"inspect": ["inspect"], "ls": ["images"], "list": ["images"], "rm": ["rmi"], "remove": ["rmi"],
+                      "load": ["load"]}
 # `docker ... inspect --type ...` disambiguates container vs image; xcrunner's inspect is
 # always an image, so that flag (and its `=value` form) is dropped. `--format`/`-f` is
 # NOT dropped here: cmd_inspect understands the exact `{{.Id}}` format itself (see below).
@@ -293,6 +294,22 @@ def cmd_pull(rt: Runtime, args) -> int:
     platform = parse_platform(args.platform) if args.platform else None
     img = rt.pull(args.image, platform)
     print(f"{args.image}: {img.short_id}")
+    return 0
+
+
+def cmd_load(rt: Runtime, args) -> int:
+    platform = parse_platform(args.platform) if args.platform else None
+    if args.input in (None, "-"):
+        img, refs = rt.load(sys.stdin.buffer, tag=args.tag, platform=platform)
+    else:
+        try:
+            f = open(args.input, "rb")
+        except OSError as e:
+            raise UsageError(f"cannot read {args.input}: {e.strerror or e}") from e
+        with f:
+            img, refs = rt.load(f, tag=args.tag, platform=platform)
+    for ref in refs:
+        print(f"Loaded image: {ref} ({img.short_id})")
     return 0
 
 
@@ -623,6 +640,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("image")
     s.add_argument("--platform")
     s.set_defaults(func=cmd_pull)
+
+    s = sub.add_parser("load", help="import an image saved with `docker save` (plain or gzipped)")
+    s.add_argument("-i", "--input", help="the archive file (default: read standard input)")
+    s.add_argument("-t", "--tag", help="also name the image NAME:TAG (needed when the archive names none)")
+    s.add_argument("-q", "--quiet", action="store_true", help="accepted for docker compatibility")
+    s.add_argument("--platform", help="the platform to take from a multi-platform archive")
+    s.set_defaults(func=cmd_load)
 
     s = sub.add_parser("inspect", help="print image metadata as JSON")
     s.add_argument("--format", "-f", help="only \"{{.Id}}\" is understood; anything else is ignored")

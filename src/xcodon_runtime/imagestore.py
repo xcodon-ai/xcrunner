@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xcodon_runtime.daemon import DaemonSource
+from xcodon_runtime.daemon import DaemonSource, read_image_archive
 from xcodon_runtime.errors import ImageNotFound, PullError, XcodonError
 from xcodon_runtime.flatten import build_rootfs
 from xcodon_runtime.home import RuntimeHome
@@ -165,6 +165,31 @@ class ImageStore:
             if not explicit:
                 _check_runnable(fetched.config, reference.name)
             return self.import_fetched(fetched, reference.name)
+
+    def load_archive(self, stream, *, tag: str | None = None,
+                     platform: Platform | None = None) -> tuple[Image, list[str]]:
+        """Import a `docker save` archive (``docker load``). Returns the image and its refs.
+
+        The refs are the names the archive records, plus ``tag`` when given. An archive
+        that names no image needs ``tag``. The image is checked for the host's platform
+        like a pull, unless ``platform`` is given.
+        """
+        explicit = platform is not None
+        platform = platform or host_platform()
+        with self.home.lock("store", shared=True):
+            fetched, names = read_image_archive(stream, self.home, platform)
+            fetched.source = "archive"
+            if tag:
+                names = [tag, *names]
+            refs = list(dict.fromkeys(parse_reference(n).name for n in names))
+            if not refs:
+                raise PullError("the archive names no image; give it one with --tag NAME:TAG")
+            if not explicit:
+                _check_runnable(fetched.config, refs[0])
+            img = self.import_fetched(fetched, refs[0])
+            for ref in refs[1:]:
+                self._set_ref(ref, img.id)
+        return self._load(img.id), refs
 
     def import_fetched(self, fetched: FetchedImage, ref_name: str) -> Image:
         """Import a fetched image.
