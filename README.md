@@ -243,6 +243,11 @@ Limits:
   they look for the container path on the host. HDF5 in h5py's wheels does: its
   default driver failed every `h5py.File` with "can't retrieve stat info for file".
   Containers therefore get `HDF5_DRIVER=stdio` unless you set it.
+- uv persists its cache locks with a raw system call, which Fakechroot does not map: with
+  the cache under `/root` it reached the host's `/root`, and `uv pip install` failed with
+  "Could not persist temporary file … Permission denied". Containers therefore get
+  `UV_CACHE_DIR` set to a shared `.udocker-uv-cache` folder next to the containers, mounted
+  at the same path inside, unless you set `UV_CACHE_DIR` yourself.
 - `xcrunner commit` is refused: the copy holds patched programs that would not run
   elsewhere.
 

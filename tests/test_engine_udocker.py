@@ -257,3 +257,23 @@ def test_hdf5_uses_the_stdio_driver_unless_the_caller_chooses(rt, fake, tmp_path
     rt.exec(mine, ["/bin/sh", "-c", "true"])
     argv = _calls(log, "run")[-1]["argv"]
     assert "--env=HDF5_DRIVER=sec2" in argv and "--env=HDF5_DRIVER=stdio" not in argv
+
+
+def test_uv_gets_a_cache_at_the_same_path_inside_and_outside(rt, fake, tmp_path):
+    """uv persists cache locks with a raw renameat2 that Fakechroot does not map; with the cache
+    under /root it hit the host's /root and every uv install failed with "Permission denied"."""
+    _, log = fake
+    c = rt.create(REF, command=["/bin/sh"])
+    rt.start(c)
+    rt.exec(c, ["/bin/sh", "-c", "true"])
+    argv = _calls(log, "run")[-1]["argv"]
+    cache = (c.dir.parent / ".udocker-uv-cache").resolve()
+    assert f"--env=UV_CACHE_DIR={cache}" in argv
+    assert f"--volume={cache}:{cache}" in argv and cache.is_dir()
+    assert [x.id for x in rt.containers(all=True)] == [c.id], "the cache folder is not a container"
+    mine = rt.create(REF, command=["/bin/sh"], env={"UV_CACHE_DIR": "/scratch/uv"})
+    rt.start(mine)
+    rt.exec(mine, ["/bin/sh", "-c", "true"])
+    argv = _calls(log, "run")[-1]["argv"]
+    assert "--env=UV_CACHE_DIR=/scratch/uv" in argv, "the caller's choice stands"
+    assert not any(a.startswith(f"--volume={cache}") for a in argv)

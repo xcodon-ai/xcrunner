@@ -35,6 +35,12 @@ MODE_ENV = "XCRUNNER_UDOCKER_MODE"
 # failed with "can't retrieve stat info for file" (in every F mode). The stdio driver skips that
 # check, and HDF5 1.14+ reads its default driver from HDF5_DRIVER.
 GUEST_ENV_DEFAULTS = {"HDF5_DRIVER": "stdio"}
+# Programs that make raw system calls also escape Fakechroot. uv persists every cache lock with a
+# raw renameat2 (tempfile → rustix), so with HOME=/root the rename hit the host's /root: every
+# `uv pip install` of a package not yet in the image failed with "Could not persist temporary
+# file ... Permission denied". A uv cache at the same path on the host and in the container
+# serves both the rewritten calls and the raw ones. Shared by this user's udocker containers.
+UV_CACHE_FOLDER = ".udocker-uv-cache"
 DEFAULT_MODE = "F3"
 VALID_MODES = ("F1", "F2", "F3", "F4")
 CONTAINER_NAME = "c"
@@ -84,6 +90,11 @@ class UdockerEngine:
         if container.env_dir:
             return env_layer_dir(container.env_dir, container.image_id) / "udocker"
         return container.dir / "udocker"
+
+    def uv_cache_dir(self, container: Container) -> Path:
+        """The uv cache udocker containers share, next to the containers: on the disk the user
+        chose for them. Bound at its own path, so a raw system call finds it too."""
+        return (container.dir.parent / UV_CACHE_FOLDER).resolve()
 
     def rootfs_path(self, container: Container) -> Path:
         """The patched container root, ``<udocker folder>/<id>/ROOT``, reached through the ``c`` alias."""
@@ -179,8 +190,21 @@ class UdockerEngine:
             log.warning("udocker engine cannot enforce read-only binds; %s is writable", ", ".join(readonly))
         cmd = [sys.executable, "-m", "xcodon_runtime.groupexec", "--", self._udocker(), "--quiet", "run",
                "--nobanner", "--nometa", f"--workdir={workdir}"]
-        cmd += [f"--env={k}={v}" for k, v in {**GUEST_ENV_DEFAULTS, **env}.items()]
+        guest_env = {**GUEST_ENV_DEFAULTS, **env}
+        uv_cache = None
+        if "UV_CACHE_DIR" not in env:
+            try:
+                uv_cache = self.uv_cache_dir(container)
+                uv_cache.mkdir(parents=True, exist_ok=True)
+                guest_env["UV_CACHE_DIR"] = str(uv_cache)
+            except OSError:
+                log.warning("container %s: no uv cache folder; uv installs may fail", container.short_id,
+                            exc_info=True)
+                uv_cache = None
+        cmd += [f"--env={k}={v}" for k, v in guest_env.items()]
         cmd += [f"--volume={b.source}:{b.target}" for b in container.binds]
+        if uv_cache is not None:
+            cmd.append(f"--volume={uv_cache}:{uv_cache}")
         cmd += [CONTAINER_NAME, *argv]
         return subprocess.Popen(cmd, env=self._env(container), **popen_kwargs)
 
