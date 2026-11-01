@@ -167,7 +167,7 @@ def test_resolve_reimports_when_daemon_id_changed(home, busybox_image, monkeypat
     calls = []
     monkeypatch.setattr(DaemonSource, "available", lambda self: True)
     monkeypatch.setattr(DaemonSource, "image_id", lambda self, ref: "sha256:" + "f" * 64)
-    monkeypatch.setattr(ImageStore, "pull", lambda self, ref, platform=None: calls.append(ref) or busybox_image)
+    monkeypatch.setattr(ImageStore, "pull", lambda self, ref, platform=None, progress=None: calls.append(ref) or busybox_image)
     rt.resolve_image("xcodon-test/busybox")
     assert calls == ["xcodon-test/busybox"]
     monkeypatch.setattr(DaemonSource, "image_id", lambda self, ref: "sha256:" + "d" * 64)

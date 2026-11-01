@@ -79,6 +79,8 @@ def _argv(command: str | Sequence[str] | None, default: list[str]) -> list[str]:
 class Runtime:
     def __init__(self, home: Path | str | None = None, engine: str | None = None) -> None:
         self.home = RuntimeHome(home)
+        # A progress.PullProgress to report pulls on, docker style; None keeps the API silent.
+        self.progress = None
         # Before the container store exists: on a node whose default container folder cannot
         # hold overlay layers (NFS), a node-local one turns PRoot into ns (see localdirs.py).
         self.auto_dirs_note = ""
@@ -116,7 +118,7 @@ class Runtime:
     # -- images ------------------------------------------------------------------
 
     def pull(self, ref: str, platform: Platform | None = None) -> Image:
-        return self.images.pull(ref, platform)
+        return self.images.pull(ref, platform, progress=self.progress)
 
     def load(self, stream, tag: str | None = None, platform: Platform | None = None) -> tuple[Image, list[str]]:
         """Import a `docker save` archive read from ``stream``; returns the image and its refs."""
@@ -134,7 +136,7 @@ class Runtime:
 
     def resolve_image(self, ref: str, pull: str = "missing") -> Image:
         if pull == "always":
-            return self.images.pull(ref)
+            return self.images.pull(ref, progress=self.progress)
         img = self.images.get(ref)
         if img is not None:
             # Spec 11.5: only "missing" looks for a moved daemon tag. "never"
@@ -143,7 +145,7 @@ class Runtime:
             if pull == "missing" and not self._is_id_ref(ref, img) and self._daemon_tag_moved(ref, img):
                 log.info("image %s changed in the local docker daemon; importing it again", ref)
                 try:
-                    return self.images.pull(ref)
+                    return self.images.pull(ref, progress=self.progress)
                 except XcodonError as e:
                     log.warning("could not import %s again from the local docker daemon (%s); "
                                 "using the stored image %s", ref, e, img.short_id)
@@ -152,7 +154,9 @@ class Runtime:
         if pull == "never":
             raise ImageNotFound(f"image {ref!r} is not in the local store")
         log.info("image %s not found locally; pulling", ref)
-        return self.images.pull(ref)
+        if self.progress:
+            self.progress.note(f"Unable to find image '{ref}' locally")
+        return self.images.pull(ref, progress=self.progress)
 
     def _is_id_ref(self, ref: str, img: Image) -> bool:
         """True when ``ref`` named ``img`` by its id (all 64 hex digits, or a unique prefix), not by a tag."""

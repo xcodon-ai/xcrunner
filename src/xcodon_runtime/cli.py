@@ -292,6 +292,8 @@ def _warn_ignored(opts: RunOptions) -> None:
 
 def cmd_pull(rt: Runtime, args) -> int:
     platform = parse_platform(args.platform) if args.platform else None
+    if args.quiet:
+        rt.progress = None
     img = rt.pull(args.image, platform)
     print(f"{args.image}: {img.short_id}")
     return 0
@@ -639,6 +641,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("pull", help="fetch an image into the local store")
     s.add_argument("image")
     s.add_argument("--platform")
+    s.add_argument("-q", "--quiet", action="store_true", help="no progress, only the result line")
     s.set_defaults(func=cmd_pull)
 
     s = sub.add_parser("load", help="import an image saved with `docker save` (plain or gzipped)")
@@ -829,6 +832,10 @@ def _main_local(argv: list[str] | None = None, _runtime: Runtime | None = None) 
         _configure_logging(args.verbose)
     try:
         rt = _runtime if _runtime is not None else Runtime(args.home, engine=args.engine)
+        if _runtime is None:
+            from xcodon_runtime.progress import PullProgress
+
+            rt.progress = PullProgress(sys.stderr)
         return args.func(rt, args)
     except XcodonError as e:
         print(f"xcrunner: {e}", file=sys.stderr)

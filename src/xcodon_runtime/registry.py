@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -197,7 +198,8 @@ class RegistryClient:
     def _manifest(self, ref: Reference, manifest_ref: str) -> dict:
         return self._manifest_and_digest(ref, manifest_ref)[0]
 
-    def fetch(self, ref: Reference, platform: Platform, fallbacks: tuple[Platform, ...] = ()) -> FetchedImage:
+    def fetch(self, ref: Reference, platform: Platform, fallbacks: tuple[Platform, ...] = (),
+              progress=None) -> FetchedImage:
         manifest, top_digest = self._manifest_and_digest(ref, ref.manifest_ref)
         if manifest.get("mediaType") in INDEX_TYPES or "manifests" in manifest:
             digest = select_platform(manifest["manifests"], platform, fallbacks)
@@ -206,14 +208,29 @@ class RegistryClient:
             raise PullError(f"{ref.name}: unsupported manifest type {manifest.get('mediaType')!r} (schema v1 is not supported)")
         config_digest = manifest["config"]["digest"]
         config = json.loads(self.fetch_blob(ref, config_digest).read_text())
-        layers = [
-            FetchedLayer(l["digest"], l.get("mediaType", ""), int(l.get("size", 0)), self.fetch_blob(ref, l["digest"]))
-            for l in manifest["layers"]
-        ]
+        diff_ids = config.get("rootfs", {}).get("diff_ids", []) if isinstance(config, dict) else []
+        if len(diff_ids) != len(manifest["layers"]):
+            diff_ids = [None] * len(manifest["layers"])  # import_fetched reports the mismatch
+        layers = []
+        for l, diff_id in zip(manifest["layers"], diff_ids):
+            digest, size = l["digest"], int(l.get("size", 0))
+            if isinstance(diff_id, str) and ":" in diff_id and (self.home.layers / diff_id.split(":", 1)[1]).is_dir():
+                # Already extracted in the store: nothing to download. The import skips
+                # a layer whose directory exists, so it never opens this blob path.
+                if progress:
+                    progress.layer(digest, "Already exists")
+                blob = self.home.blobs / digest.split(":", 1)[1]
+            else:
+                if progress:
+                    progress.layer(digest, "Pulling fs layer")
+                blob = self.fetch_blob(ref, digest, size=size, progress=progress)
+                if progress:
+                    progress.layer(digest, "Download complete")
+            layers.append(FetchedLayer(digest, l.get("mediaType", ""), size, blob))
         return FetchedImage(config_digest, config, layers, source=self.name,
                              repo_digests=[f"{ref.registry}/{ref.repository}@{top_digest}"])
 
-    def fetch_blob(self, ref: Reference, digest: str) -> Path:
+    def fetch_blob(self, ref: Reference, digest: str, size: int = 0, progress=None) -> Path:
         """Download a blob to the home blob store, verifying its digest. Idempotent."""
         algo, _, hexdigest = digest.partition(":")
         if algo != "sha256":
@@ -226,9 +243,15 @@ class RegistryClient:
         log.info("downloading %s", digest[:19])
         try:
             with self._get(ref, f"blobs/{digest}") as r, open(part, "wb") as out:
+                total = size or int(r.headers.get("Content-Length") or 0)
+                done, shown = 0, 0.0
                 for chunk in iter(lambda: r.read(CHUNK), b""):
                     h.update(chunk)
                     out.write(chunk)
+                    done += len(chunk)
+                    if progress and (time.monotonic() - shown >= 0.1 or done == total):
+                        progress.downloading(digest, done, total)
+                        shown = time.monotonic()
         except (OSError, http.client.HTTPException, urllib.error.URLError) as e:
             part.unlink(missing_ok=True)
             raise PullError(f"download of {digest} failed: {e}") from e

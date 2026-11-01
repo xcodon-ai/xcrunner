@@ -37,7 +37,7 @@ On an Apple silicon Mac, xcrunner runs the Linux xcrunner inside a Lima VM; see
 
 ## Use
 
-    xcrunner pull python:3.12-slim
+    xcrunner pull python:3.12-slim          # docker-style progress on stderr; -q for none
     xcrunner run --rm -v $PWD:/work -w /work python:3.12-slim python -c 'print("hi")'
     xcrunner create --name dev python:3.12-slim
     xcrunner start dev
@@ -61,6 +61,11 @@ the `XCRUNNER_ENV_DIR` variable.
 
 Two global flags come before the subcommand: `--engine ns|proot` forces an
 engine, and `--home DIR` picks the state directory for this one command.
+
+`xcrunner pull`, and a `run` or `create` that has to pull, report progress on stderr as
+docker does: one line per layer, a live progress bar in a terminal, and only the step
+changes in a log. Layers already in the store are not downloaded again ("Already
+exists"). The last line on stdout stays `<ref>: <image id>`.
 
 Images already in a local Docker daemon are reused through `docker save`, so
 locally built images work without a registry. xcrunner records the daemon's

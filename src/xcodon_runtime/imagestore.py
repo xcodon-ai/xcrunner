@@ -130,7 +130,7 @@ class ImageStore:
 
     # -- pull --------------------------------------------------------------------
 
-    def pull(self, ref: str, platform: Platform | None = None) -> Image:
+    def pull(self, ref: str, platform: Platform | None = None, progress=None) -> Image:
         """Fetch ``ref`` for ``platform``, by default the host's own.
 
         With no ``platform`` given, an index without the host's platform falls
@@ -147,6 +147,8 @@ class ImageStore:
         # concurrent prune (which takes it exclusive) cannot delete a blob
         # that is still downloading. Lock order: pull -> store -> layer/image/refs.
         with self.home.lock(lock_name), self.home.lock("store", shared=True):
+            if progress:
+                progress.start(reference.name)
             errors: list[str] = []
             for source in self.sources:
                 if isinstance(source, DaemonSource):
@@ -154,8 +156,10 @@ class ImageStore:
                         continue
                 try:
                     if isinstance(source, RegistryClient):
-                        fetched = source.fetch(reference, platform, fallbacks=fallbacks)
+                        fetched = source.fetch(reference, platform, fallbacks=fallbacks, progress=progress)
                     else:
+                        if progress:
+                            progress.note(f"Loading {reference.name} from the local docker daemon")
                         fetched = source.fetch(reference, platform)
                     break
                 except PullError as e:
@@ -164,7 +168,15 @@ class ImageStore:
                 raise PullError(f"could not fetch {reference.name}: " + ("; ".join(errors) or "no source available"))
             if not explicit:
                 _check_runnable(fetched.config, reference.name)
-            return self.import_fetched(fetched, reference.name)
+            image_id = fetched.config_digest.split(":", 1)[1]
+            up_to_date = (self.home.read_refs().get(reference.name) == image_id
+                          and (self.home.images / image_id).is_dir())
+            image = self.import_fetched(fetched, reference.name, progress=progress)
+            if progress:
+                digest = fetched.repo_digests[0].split("@", 1)[1] if fetched.repo_digests else None
+                progress.finish(digest, f"Image is up to date for {reference.name}" if up_to_date
+                                else f"Downloaded newer image for {reference.name}")
+            return image
 
     def load_archive(self, stream, *, tag: str | None = None,
                      platform: Platform | None = None) -> tuple[Image, list[str]]:
@@ -191,7 +203,7 @@ class ImageStore:
                 self._set_ref(ref, img.id)
         return self._load(img.id), refs
 
-    def import_fetched(self, fetched: FetchedImage, ref_name: str) -> Image:
+    def import_fetched(self, fetched: FetchedImage, ref_name: str, progress=None) -> Image:
         """Import a fetched image.
 
         Holds ``store`` shared (a reader), so a concurrent ``prune`` (which
@@ -204,7 +216,14 @@ class ImageStore:
             diff_ids = fetched.config.get("rootfs", {}).get("diff_ids", [])
             if len(diff_ids) != len(fetched.layers):
                 raise PullError(f"config lists {len(diff_ids)} diff_ids but manifest has {len(fetched.layers)} layers")
-            layer_dirs = [self._ensure_layer(diff_id, layer.blob_path) for diff_id, layer in zip(diff_ids, fetched.layers)]
+            layer_dirs = []
+            for diff_id, layer in zip(diff_ids, fetched.layers):
+                is_new_layer = progress is not None and not (self.home.layers / diff_id.split(":", 1)[1]).exists()
+                if is_new_layer:
+                    progress.layer(layer.digest, "Extracting")
+                layer_dirs.append(self._ensure_layer(diff_id, layer.blob_path))
+                if is_new_layer:
+                    progress.layer(layer.digest, "Pull complete")
 
             image_dir = self.home.images / image_id
             is_new = False
