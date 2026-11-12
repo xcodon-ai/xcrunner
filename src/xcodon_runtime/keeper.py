@@ -64,7 +64,11 @@ def build_mount_steps(plan: dict, old_name: str) -> list[tuple[str, ...]]:
     steps += [("symlink", target, f"/dev/{name}") for name, target in DEV_SYMLINKS]
     steps.append(("proc", "/proc"))
     steps.append(("bind", f"{old}/sys", "/sys", True))
-    steps += [("bind", f"{old}{f}", f, True) for f in HOST_FILES]
+    # Resolved here, before the pivot: an absolute link such as a VPN's
+    # /etc/resolv.conf -> /opt/.../resolv.conf would otherwise resolve inside the
+    # container, look missing, and leave the container with no DNS. User binds are
+    # resolved when the container is created (containers._host_real).
+    steps += [("bind", f"{old}{os.path.realpath(f)}", f, True) for f in HOST_FILES]
     steps += [
         ("bind", f"{old}{b['source']}", b["target"], bool(b.get("readonly", False)))
         for b in plan["binds"]
