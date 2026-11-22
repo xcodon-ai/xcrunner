@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from xcodon_runtime.containers import Container
@@ -33,6 +34,25 @@ KEEPER_PID = "keeper.pid"
 KEEPER_ARGV = [sys.executable, "-m", "xcodon_runtime.keeper"]
 START_TIMEOUT = 60.0
 KILL_TIMEOUT = 5.0
+# What the keeper needs to start Python and import this package. Nothing else of the
+# caller's environment may reach it: see ``keeper_env``.
+KEEPER_ENV_NAMES = frozenset({
+    "PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME", "PYTHONUNBUFFERED",
+    "PYTHONDONTWRITEBYTECODE", "VIRTUAL_ENV", "LANG", "TZ",
+})
+
+
+def keeper_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """The environment the keeper starts with.
+
+    The keeper is pid 1 of the sandbox, so every process inside can read its
+    environment from ``/proc/1/environ``. A keeper that inherited the caller's
+    environment would hand the sandbox every variable of the host session:
+    API keys, tokens, job settings. It gets only the loader and locale
+    variables Python needs. Commands run in the container get the container's
+    own environment through ``nsexec``.
+    """
+    return {k: v for k, v in environ.items() if k in KEEPER_ENV_NAMES or k.startswith("LC_")}
 
 
 def process_start_time(pid: int) -> str | None:
@@ -118,7 +138,7 @@ class NsEngine:
             pass_fds = (w,) if lock_fd is None else (w, lock_fd)
             with open(log_path, "ab") as logf:
                 proc = subprocess.Popen(
-                    [*KEEPER_ARGV, str(plan_path), str(w)],
+                    [*KEEPER_ARGV, str(plan_path), str(w)], env=keeper_env(os.environ),
                     pass_fds=pass_fds, stdin=subprocess.DEVNULL, stdout=logf, stderr=logf,
                     start_new_session=True, close_fds=True,
                 )

@@ -332,3 +332,25 @@ def test_two_concurrent_starts_leave_one_keeper(home, busybox_rootfs, engine):
     finally:
         engine.stop(c)
     assert keeper_processes(c) == []
+
+
+def test_keeper_env_keeps_only_what_the_keeper_needs():
+    host = {"PATH": "/usr/bin", "PYTHONPATH": "/src", "LD_LIBRARY_PATH": "/lib", "LC_ALL": "C",
+            "SOME_API_KEY": "secret", "SLURM_JOB_ID": "1", "HOME": "/home/u"}
+    env = engine_ns.keeper_env(host)
+    assert env == {"PATH": "/usr/bin", "PYTHONPATH": "/src", "LD_LIBRARY_PATH": "/lib", "LC_ALL": "C"}
+
+
+def test_host_environment_is_not_readable_in_the_sandbox(home, busybox_rootfs, engine, monkeypatch):
+    """Pid 1 of the sandbox is the keeper. Its environment is readable from inside
+    (`/proc/1/environ`), so it must not carry the host's variables."""
+    monkeypatch.setenv("XCR_TEST_HOST_SECRET", "do-not-leak-7f3a")
+    c = make_container(home, busybox_rootfs)
+    engine.start(c)
+    try:
+        r = sh(engine, c, "cat /proc/*/environ 2>/dev/null | tr '\\0' '\\n'")
+        assert r.returncode == 0
+        assert "do-not-leak-7f3a" not in r.stdout
+        assert "XCR_TEST_HOST_SECRET" not in r.stdout
+    finally:
+        engine.stop(c)
